@@ -1,0 +1,40 @@
+version: '3.8'
+
+services:
+  postgres:
+    image: postgres
+    container_name: PT-postgres-db-draft01
+    restart: always
+    ports:
+      - "5433:5432"
+    environment:
+      POSTGRES_USER: fueladmin
+      POSTGRES_PASSWORD: mysecretpassword
+      POSTGRES_DB: fueltheftdb
+    volumes:
+      - fueltheft-postgres-volume-v2:/var/lib/postgresql/data
+
+  mqtt:
+    image: eclipse-mosquitto
+    container_name: PT-mqtt-broker
+    restart: always
+    ports:
+      - "1883:1883"
+      - "9001:9001"
+
+  backend:
+    container_name: PT-backend
+    build: .
+    ports:
+      - "3000:3000"
+    volumes:
+      - .:/app
+    depends_on:
+      - postgres
+      - mqtt
+    environment:
+      - DATABASE_URL=${DATABASE_URL}
+    command: npm run dev
+
+volumes:
+  fueltheft-postgres-volume-v2:

@@ -1,0 +1,122 @@
+generator client {
+  provider = "prisma-client-js"
+  output   = "../src/generated/prisma"
+  binaryTargets = ["native", "debian-openssl-3.0.x"]
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model Vehicle {
+  id             String   @id @default(uuid())
+  registrationNo String   @unique
+  model          String?
+  capacity       Int?
+  mileageEst     Float?
+  createdAt      DateTime @default(now())
+
+  driver         Driver?
+  sensor         Sensor?
+  route          Route?   @relation(fields: [routeId], references: [id])
+  routeId        String?
+
+  events         Event[]
+}
+
+model Driver {
+  id        String   @id @default(uuid())
+  name      String
+  phone     String   @unique
+  licenseNo String   @unique
+  createdAt DateTime @default(now())
+
+  vehicle   Vehicle  @relation(fields: [vehicleId], references: [id])
+  vehicleId String   @unique
+}
+
+model Route {
+  id         String    @id @default(uuid())
+  name       String
+  startPoint String
+  endPoint   String
+  createdAt  DateTime  @default(now())
+
+  vehicles   Vehicle[]
+}
+
+model Sensor {
+  id          String   @id @default(uuid())
+  sensorCode  String   @unique
+  isActive    Boolean  @default(true)
+  installedAt DateTime @default(now())
+  lastSeen    DateTime?
+
+  vehicle     Vehicle  @relation(fields: [vehicleId], references: [id])
+  vehicleId   String   @unique
+
+  alerts      Alert[]
+  onOffEvents SensorOnOffEvent[]
+  readings    SensorReading[]
+}
+
+model SensorReading {
+  id           String   @id @default(uuid())
+  timestamp    DateTime @default(now())
+  fuelLevel    Float
+  distanceKm   Float
+  locationLat  Float
+  locationLong Float
+
+  sensor   Sensor @relation(fields: [sensorId], references: [id])
+  sensorId String
+
+  @@index([timestamp]) // helpful for time filtering
+}
+
+model Alert {
+  id           String   @id @default(uuid())
+  timestamp    DateTime @default(now())
+  type         AlertType
+  description  String?
+  locationLat  Float
+  locationLong Float
+
+  sensor   Sensor @relation(fields: [sensorId], references: [id])
+  sensorId String
+}
+
+model SensorOnOffEvent {
+  id         String   @id @default(uuid())
+  status     SensorStatus
+  changedBy  String?
+  timestamp  DateTime @default(now())
+
+  sensor   Sensor @relation(fields: [sensorId], references: [id])
+  sensorId String
+}
+
+model Event {
+  id             String     @id @default(uuid())
+  type           AlertType
+  startTime      DateTime
+  endTime        DateTime?
+  fuelDropLitres Float?
+  notes          String?
+
+  vehicle   Vehicle  @relation(fields: [vehicleId], references: [id])
+  vehicleId String
+}
+
+enum AlertType {
+  THEFT
+  REFUEL
+  LOW_FUEL
+  UNKNOWN
+}
+
+enum SensorStatus {
+  ON
+  OFF
+}
