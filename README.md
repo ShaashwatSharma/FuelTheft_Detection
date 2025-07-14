@@ -1,4 +1,4 @@
-# 🛢️ Fuel Theft Detection Backend (PetroTrack SSD)
+# 🛢️ Fuel-Theft Detection Backend 
 
 A backend system designed to monitor and detect fuel theft events in public transport vehicles using real-time IoT sensor data. The system ingests fuel level readings via MQTT, persists them in PostgreSQL using Prisma ORM, and detects suspicious events such as fuel theft or refueling using an algorithmic detection engine.
 
@@ -13,7 +13,6 @@ A backend system designed to monitor and detect fuel theft events in public tran
 - [🧪 Data Simulation](#-data-simulation)
 - [🧰 Developer Utilities](#-developer-utilities)
 - [📌 Project Structure](#-project-structure)
-- [📄 License](#-license)
 
 ---
 
@@ -157,5 +156,5 @@ Dockerfile                 # Backend container config
 ```
 
 ---
-
+## END
 
