@@ -1,10 +1,10 @@
 import mqtt from 'mqtt';
 import prisma from '../lib/prisma';
+import dotenv from 'dotenv';
 
-const MQTT_BROKER_URL = 'mqtt://localhost:1883';
+dotenv.config();
 const TOPIC = 'fuel/readings';
-
-const client = mqtt.connect(MQTT_BROKER_URL);
+const client = mqtt.connect(process.env.MQTT_BROKER_URL || 'mqtt://host.docker.internal:1883');
 
 client.on('connect', () => {
   console.log(`✅ Connected to MQTT broker`);
@@ -55,3 +55,13 @@ client.on('message', async (topic, message) => {
     console.error('❌ Error processing MQTT message:', err);
   }
 });
+
+
+
+
+
+
+// const MQTT_BROKER_URL = process.env.MQTT_BROKER_URL ;
+// const MQTT_BROKER_URL = 'mqtt://localhost:1883';
+// const MQTT_BROKER_URL = 'mqtt://mqtt:1883';
+// const MQTT_BROKER_URL="mqtt://host.docker.internal:1883"; // For Docker setup, use host.docker.internal

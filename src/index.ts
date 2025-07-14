@@ -1,13 +1,14 @@
 import prisma from './lib/prisma';
-import './mqtt/listener';
 import { runDetection } from './processor/detector';
 import cron from 'node-cron';
-import './mqtt/listener';
 import './processor/detector';
 import './api';
+import './mqtt/listener';
+// import startListener from './mqtt/listener';
 
 
 
+// startListener(); 
 
 
 async function main() {
@@ -16,9 +17,10 @@ async function main() {
 }
 
 // setTimeout(runDetection, 10000); // run 10 sec after start
-cron.schedule('*/2 * * * *', runDetection);// Every 2 minutes
+cron.schedule('*/1 * * * *', runDetection);// Every 1 minutes
 
 main().catch(e => {
   console.error(e);
   process.exit(1);
 });
+
