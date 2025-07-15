@@ -17,7 +17,7 @@ const dateRanges: Record<string, () => { from: Date; to: Date }> = {
   },
   this_week: () => {
     const from = new Date();
-    const day = from.getDay(); // 0 (Sun) to 6 (Sat)
+    const day = from.getDay();
     from.setDate(from.getDate() - day);
     from.setHours(0, 0, 0, 0);
     return { from, to: new Date() };
@@ -52,6 +52,14 @@ export async function getBusDetails(req: Request, res: Response) {
               },
               orderBy: { timestamp: 'asc' },
             },
+            alerts: {
+              where: {
+                timestamp: {
+                  gte: from,
+                  lte: to,
+                },
+              },
+            },
           },
         },
         events: {
@@ -69,24 +77,36 @@ export async function getBusDetails(req: Request, res: Response) {
       return res.status(404).json({ message: 'Bus or sensor not found' });
     }
 
-const latestReading = vehicle.sensor.readings[vehicle.sensor.readings.length - 1];
+    // Create a mapping of events by closest timestamp (can be improved using fuzzy matching if needed)
+    const eventMap = new Map<string, { type: string; description?: string }>();
+
+    for (const alert of vehicle.sensor.alerts) {
+      const ts = alert.timestamp.toISOString();
+      eventMap.set(ts, {
+        type: alert.type,
+        description: alert.description || undefined,
+      });
+    }
+
+    const readings = vehicle.sensor.readings.map((r) => {
+      const ts = r.timestamp.toISOString();
+      const event = eventMap.get(ts);
+      return {
+        timestamp: ts,
+        fuelLevel: r.fuelLevel,
+        ...(event ? { eventType: event.type, description: event.description } : {}),
+      };
+    });
+
+    const latestReading = vehicle.sensor.readings.at(-1);
 
     res.json({
       registrationNo: vehicle.registrationNo,
       driver: vehicle.driver?.name,
       route: vehicle.route?.name,
       capacity: vehicle.capacity,
-      currentFuelLevel: latestReading?.fuelLevel,
-      readings: vehicle.sensor.readings.map(r => ({
-        timestamp: r.timestamp,
-        fuelLevel: r.fuelLevel,
-      })),
-      events: vehicle.events.map(e => ({
-        type: e.type,
-        startTime: e.startTime,
-        endTime: e.endTime,
-        fuelDropLitres: e.fuelDropLitres,
-      })),
+      currentFuelLevel: latestReading?.fuelLevel ?? null,
+      readings,
     });
   } catch (err) {
     console.error(err);
