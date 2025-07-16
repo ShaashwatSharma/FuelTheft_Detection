@@ -22,7 +22,9 @@ services:
 
   backend:
     container_name: PT-backend
-    build: .
+    build:
+      context: .
+      dockerfile: Dockerfile
     ports:
       - "3000:3000"
       - "5555:5555"
@@ -33,7 +35,66 @@ services:
     depends_on:
       - postgres
       - mqtt
+      - model-service
     command: npm run dev
+
+  model-service:
+    container_name: PT-model-api
+    build:
+      context: .
+      dockerfile: model.Dockerfile
+    ports:
+      - "5001:5000"
+    restart: always
+    expose:
+      - "5000"
 
 volumes:
   fueltheft_pg_data:
+
+
+
+
+
+
+
+
+# services:
+#   postgres:
+#     image: postgres:15
+#     container_name: PT-postgres-db
+#     restart: always
+#     ports:
+#       - "5433:5432"
+#     environment:
+#       POSTGRES_USER: fueladmin
+#       POSTGRES_PASSWORD: mysecretpassword
+#       POSTGRES_DB: fueltheftdb
+#     volumes:
+#       - fueltheft_pg_data:/var/lib/postgresql/data
+
+#   mqtt:
+#     image: eclipse-mosquitto
+#     container_name: PT-mqtt-broker
+#     restart: always
+#     ports:
+#       - "1883:1883"
+#       - "9001:9001"
+
+#   backend:
+#     container_name: PT-backend
+#     build: .
+#     ports:
+#       - "3000:3000"
+#       - "5555:5555"
+#     volumes:
+#       - .:/app
+#     env_file:
+#       - docker.env
+#     depends_on:
+#       - postgres
+#       - mqtt
+#     command: npm run dev
+
+# volumes:
+#   fueltheft_pg_data:

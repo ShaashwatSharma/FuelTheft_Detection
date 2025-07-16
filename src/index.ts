@@ -11,7 +11,7 @@ async function main() {
 }
 
 // setTimeout(runDetection, 10000); // run 10 sec after start
-// cron.schedule('*/1 * * * *', runDetection);// Every 1 minutes
+cron.schedule('*/1 * * * *', runDetection);// Every 1 minutes
 
 main().catch(e => {
   console.error(e);
