@@ -1,18 +1,47 @@
-# Dockerfile-ml — for Python ML microservice
+# model.Dockerfile
 
-FROM python:3.11-slim
+FROM python:3.9-slim
 
 WORKDIR /app
 
-# Copy and install Python dependencies
-COPY src/ml/requirements.txt ./requirements.txt
+# Copy requirements and install
+COPY src/ml/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy the rest of the model code including .pkl
+# Copy your model code
 COPY src/ml ./src/ml
 
-# Expose port (if Flask runs on 5000)
+# Set env variables for Flask
+# ENV FLASK_APP=src/ml/predict_event.py
+ENV FLASK_APP=src/ml/app.py
+
+
+# Expose Flask port
 EXPOSE 5000
 
-# Start Flask API
-CMD ["python", "src/ml/predict_event.py"]
+# Run the Flask app
+# CMD ["flask", "run", "--host=0.0.0.0"]
+CMD ["flask", "run", "--host=0.0.0.0", "--port=5000"]
+
+
+
+
+# FROM python:3.11-slim
+
+# WORKDIR /app
+
+# # Copy requirements and install
+# COPY src/ml/requirements.txt ./requirements.txt
+# RUN pip install --no-cache-dir -r requirements.txt
+
+# # Copy the model code
+# COPY src/ml ./src/ml
+
+# # Set environment variables
+# ENV FLASK_APP=src/ml/predict_event.py
+
+# # Expose port
+# EXPOSE 5000
+
+# # Run app
+# CMD ["python", "src/ml/predict_event.py"]

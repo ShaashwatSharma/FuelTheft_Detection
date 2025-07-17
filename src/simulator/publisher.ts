@@ -33,7 +33,7 @@ client.on('connect', () => {
       client.publish(TOPIC, JSON.stringify(simulatedData));
       console.log(`📤 Published for ${sensorCode}:`, simulatedData);
     });
-  }, 5000); // Every 5 seconds, all sensors send data
+  }, 5000); // Every 5 seconds (5000), all sensors send data
 });
 
 function getRandomFloat(min: number, max: number): number {
