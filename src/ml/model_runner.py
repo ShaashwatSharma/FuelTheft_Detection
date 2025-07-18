@@ -6,7 +6,7 @@ import joblib
 
 # Load model and label encoder
 model = joblib.load("src/ml/model.pkl")
-label_encoder = joblib.load("src/ml/fuel_event_label_encoder_noisy.pkl")
+label_encoder = joblib.load("src/ml/fuel_event_label_encoder_with_noise.pkl")
 
 def run_prediction(input_data):
     # Parse timestamp to extract hour and minute
