@@ -1,10 +1,10 @@
 import express from 'express';
-import { getAlerts, getAllAlerts } from '../controllers/alertController';
+import { getAlerts } from '../controllers/alerts';
 
 const router = express.Router();
-
+// /alerts?type&fromDate&toDate
 router.get('/', getAlerts);
-router.get('/all', getAllAlerts);
+
 
 
 export default router;
