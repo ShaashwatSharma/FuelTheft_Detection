@@ -16,6 +16,7 @@ export async function runDetection() {
     });
 
     if (unprocessedReadings.length === 0) continue;
+    
 
     let lastProcessed = await prisma.sensorReading.findFirst({
       where: {
