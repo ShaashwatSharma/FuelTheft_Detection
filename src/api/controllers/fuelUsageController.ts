@@ -1,8 +1,6 @@
 import { Request, Response } from 'express';
 import prisma from '../../lib/prisma';
 
-// Fetch fuel usage statistics for a specific bus
-// GET /fuelusage?busId=<id>&fromDate=<date>&toDate=<date>      
 export async function getFuelUsage(req: Request, res: Response) {
   const { busId, fromDate, toDate } = req.query;
 
@@ -21,10 +19,14 @@ export async function getFuelUsage(req: Request, res: Response) {
           where: {
             timestamp: { gte: from, lte: to },
           },
+          orderBy: {
+            timestamp: 'asc', // Ensure chronological order
+          },
         },
         alerts: {
           where: {
             timestamp: { gte: from, lte: to },
+            type: { in: ['THEFT', 'REFUEL'] },
           },
         },
       },
@@ -36,31 +38,53 @@ export async function getFuelUsage(req: Request, res: Response) {
 
     const { readings, alerts } = sensor;
 
+    // Initialize variables
     let totalFuelStolen = 0;
     let totalFuelRefueled = 0;
     let distanceTravelled = 0;
+    let fuelConsumedFromReadings = 0;
 
-    for (const alert of alerts) {
-      if (alert.type === 'THEFT') totalFuelStolen += 1; // or alert.fuelDropLitres if tracked
-      if (alert.type === 'REFUEL') totalFuelRefueled += 1;
-    }
-
-    for (let i = 1; i < readings.length; i++) {
-      const prev = readings[i - 1];
-      const curr = readings[i];
-
-      const delta = curr.fuelLevel - prev.fuelLevel;
-
-      // Fuel consumption is negative change
-      if (delta < 0) {
-        totalFuelRefueled += 0; // avoid accidental refuel count
+    // Calculate from alerts
+    alerts.forEach(alert => {
+      if (alert.type === 'THEFT' && alert.fuelDropLitres) {
+        totalFuelStolen += Math.abs(alert.fuelDropLitres);
       }
+      if (alert.type === 'REFUEL' && alert.fuelAddedLitres) {
+        totalFuelRefueled += Math.abs(alert.fuelAddedLitres);
+      }
+    });
 
-      distanceTravelled += curr.distanceKm ?? 0;
+    // Calculate from readings
+    if (readings.length > 1) {
+      // Calculate distance travelled (sum of all distanceKm values)
+      distanceTravelled = readings.reduce((sum, reading) => sum + (reading.distanceKm || 0), 0);
+
+      // Calculate fuel consumed from readings (start fuel - end fuel)
+      const initialFuel = readings[0].fuelLevel;
+      const finalFuel = readings[readings.length - 1].fuelLevel;
+      fuelConsumedFromReadings = Math.max(0, initialFuel - finalFuel);
+
+      // Additional check for refuel events that might not be captured in alerts
+      for (let i = 1; i < readings.length; i++) {
+        const prev = readings[i - 1];
+        const curr = readings[i];
+        const delta = curr.fuelLevel - prev.fuelLevel;
+
+        // If fuel level increased significantly, it might be a refuel not captured in alerts
+        if (delta > 1) { // Threshold of 1 liter to avoid small fluctuations
+          totalFuelRefueled += delta;
+        }
+      }
     }
 
-    const totalFuelConsumed = totalFuelStolen + (readings.length > 0 ? readings[0].fuelLevel - readings.at(-1)!.fuelLevel : 0);
-    const fuelEfficiency = totalFuelConsumed > 0 ? distanceTravelled / totalFuelConsumed : null;
+    // Total fuel consumed is either from readings or thefts, whichever is greater
+    // This prevents negative values when refuels exceed consumption
+    const totalFuelConsumed = Math.max(fuelConsumedFromReadings, totalFuelStolen);
+
+    // Calculate fuel efficiency (km per liter)
+    const fuelEfficiency = totalFuelConsumed > 0 
+      ? distanceTravelled / totalFuelConsumed 
+      : null;
 
     res.json({
       totalFuelConsumed: parseFloat(totalFuelConsumed.toFixed(2)),
@@ -75,3 +99,82 @@ export async function getFuelUsage(req: Request, res: Response) {
     res.status(500).json({ message: 'Failed to fetch fuel usage' });
   }
 }
+
+
+// import { Request, Response } from 'express';
+// import prisma from '../../lib/prisma';
+
+// // Fetch fuel usage statistics for a specific bus
+// // GET /fuelusage?busId=<id>&fromDate=<date>&toDate=<date>      
+// export async function getFuelUsage(req: Request, res: Response) {
+//   const { busId, fromDate, toDate } = req.query;
+
+//   if (!busId) {
+//     return res.status(400).json({ message: 'Missing busId' });
+//   }
+
+//   const from = fromDate ? new Date(fromDate.toString()) : new Date('2000-01-01');
+//   const to = toDate ? new Date(toDate.toString()) : new Date();
+
+//   try {
+//     const sensor = await prisma.sensor.findFirst({
+//       where: { vehicleId: busId.toString() },
+//       include: {
+//         readings: {
+//           where: {
+//             timestamp: { gte: from, lte: to },
+//           },
+//         },
+//         alerts: {
+//           where: {
+//             timestamp: { gte: from, lte: to },
+//           },
+//         },
+//       },
+//     });
+
+//     if (!sensor) {
+//       return res.status(404).json({ message: 'Sensor not found for this bus' });
+//     }
+
+//     const { readings, alerts } = sensor;
+
+//     let totalFuelStolen = 0;
+//     let totalFuelRefueled = 0;
+//     let distanceTravelled = 0;
+
+//     for (const alert of alerts) {
+//       if (alert.type === 'THEFT') totalFuelStolen += 1; // or alert.fuelDropLitres if tracked
+//       if (alert.type === 'REFUEL') totalFuelRefueled += 1;
+//     }
+
+//     for (let i = 1; i < readings.length; i++) {
+//       const prev = readings[i - 1];
+//       const curr = readings[i];
+
+//       const delta = curr.fuelLevel - prev.fuelLevel;
+
+//       // Fuel consumption is negative change
+//       if (delta < 0) {
+//         totalFuelRefueled += 0; // avoid accidental refuel count
+//       }
+
+//       distanceTravelled += curr.distanceKm ?? 0;
+//     }
+
+//     const totalFuelConsumed = totalFuelStolen + (readings.length > 0 ? readings[0].fuelLevel - readings.at(-1)!.fuelLevel : 0);
+//     const fuelEfficiency = totalFuelConsumed > 0 ? distanceTravelled / totalFuelConsumed : null;
+
+//     res.json({
+//       totalFuelConsumed: parseFloat(totalFuelConsumed.toFixed(2)),
+//       totalFuelStolen: parseFloat(totalFuelStolen.toFixed(2)),
+//       totalFuelRefueled: parseFloat(totalFuelRefueled.toFixed(2)),
+//       distanceTravelled: parseFloat(distanceTravelled.toFixed(2)),
+//       fuelEfficiency: fuelEfficiency ? parseFloat(fuelEfficiency.toFixed(2)) : null,
+//     });
+
+//   } catch (err) {
+//     console.error(err);
+//     res.status(500).json({ message: 'Failed to fetch fuel usage' });
+//   }
+// }

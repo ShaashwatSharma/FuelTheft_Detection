@@ -10,92 +10,236 @@ export async function runDetection() {
   });
 
   for (const sensor of sensors) {
-    const unprocessedReadings = await prisma.sensorReading.findMany({
-      where: { sensorId: sensor.id, processed: false },
-      orderBy: { timestamp: 'asc' },
-    });
+    try {
+      // Get all unprocessed readings at once
+      const unprocessedReadings = await prisma.sensorReading.findMany({
+        where: { sensorId: sensor.id, processed: false },
+        orderBy: { timestamp: 'asc' },
+      });
 
-    if (unprocessedReadings.length === 0) continue;
-    
+      if (unprocessedReadings.length === 0) continue;
 
-    let lastProcessed = await prisma.sensorReading.findFirst({
-      where: {
-        sensorId: sensor.id,
-        processed: true,
-      },
-      orderBy: { timestamp: 'desc' },
-    });
+      // Get the last processed reading just once
+      let lastProcessed = await prisma.sensorReading.findFirst({
+        where: {
+          sensorId: sensor.id,
+          processed: true,
+        },
+        orderBy: { timestamp: 'desc' },
+      });
 
-    for (const curr of unprocessedReadings) {
-      if (!lastProcessed) {
-        console.log(`ℹ️ Initializing: marking first reading for ${sensor.sensorCode} as processed.`);
-        await prisma.sensorReading.update({
-          where: { id: curr.id },
-          data: { processed: true },
-        });
-        lastProcessed = curr;
-        continue;
-      }
+      // Process readings in batch within a transaction
+      await prisma.$transaction(async (tx) => {
+        for (const curr of unprocessedReadings) {
+          if (!lastProcessed) {
+            console.log(`ℹ️ Initializing: marking first reading for ${sensor.sensorCode} as processed.`);
+            await tx.sensorReading.update({
+              where: { id: curr.id },
+              data: { processed: true },
+            });
+            lastProcessed = curr;
+            continue;
+          }
 
-      const input = {
-        fuelLevel: curr.fuelLevel,
-        previous_fuel_level: lastProcessed.fuelLevel,
-        distanceKm: curr.distanceKm ?? 0,
-        locationLat: curr.locationLat ?? 0,
-        locationLong: curr.locationLong ?? 0,
-        timestamp: curr.timestamp.toISOString(),
-      };
+          // Validate required fields
+          if (curr.fuelLevel === null || curr.fuelLevel === undefined) {
+            console.warn(`⚠️ Skipping reading ${curr.id} for ${sensor.sensorCode}: missing fuelLevel`);
+            continue;
+          }
 
-      try {
-        const response = await axios.post('http://model-service:5000/predict', input);
-        const rawPrediction = response.data?.prediction;
-        const prediction = rawPrediction?.toUpperCase() as AlertType;
+          const input = {
+            fuelLevel: curr.fuelLevel,
+            previous_fuel_level: lastProcessed.fuelLevel,
+            distanceKm: curr.distanceKm ?? 0,
+            locationLat: curr.locationLat ?? 0,
+            locationLong: curr.locationLong ?? 0,
+            timestamp: curr.timestamp.toISOString(),
+          };
 
-        if (prediction && Object.values(AlertType).includes(prediction)) {
-          console.log(`✅ Prediction for ${sensor.sensorCode}: ${prediction}`);
+          try {
+            const response = await axios.post('http://model-service:5000/predict', input);
+            const rawPrediction = response.data?.prediction;
+            const prediction = rawPrediction?.toUpperCase() as AlertType;
 
-          const notes = `Predicted by ML at ${new Date().toISOString()}`;
+            if (prediction && Object.values(AlertType).includes(prediction)) {
+              console.log(`✅ Prediction for ${sensor.sensorCode}: ${prediction}`);
 
-          await prisma.event.create({
-            data: {
-              sensorId: sensor.id,
-              vehicleId: sensor.vehicleId,
-              type: prediction,
-              startTime: curr.timestamp,
-              fuelDropLitres: input.previous_fuel_level - input.fuelLevel,
-              notes,
-            },
-          });
+              const notes = `Predicted by ML at ${new Date().toISOString()}`;
+              const fuelDropLitres = input.previous_fuel_level - input.fuelLevel;
 
-          await prisma.alert.create({
-            data: {
-              type: prediction,
-              timestamp: curr.timestamp,
-              description: notes,
-              locationLat: curr.locationLat,
-              locationLong: curr.locationLong,
-              sensorId: sensor.id,
-            },
-          });
+              // Create event and alert in the same transaction
+              await Promise.all([
+                tx.event.create({
+                  data: {
+                    sensorId: sensor.id,
+                    vehicleId: sensor.vehicleId,
+                    type: prediction,
+                    startTime: curr.timestamp,
+                    fuelDropLitres,
+                    notes,
+                  },
+                }),
+                tx.alert.create({
+                  data: {
+                    type: prediction,
+                    timestamp: curr.timestamp,
+                    description: notes,
+                    locationLat: curr.locationLat,
+                    locationLong: curr.locationLong,
+                    sensorId: sensor.id,
+                  },
+                }),
+              ]);
+            }
+
+            // Mark as processed and update lastProcessed
+            await tx.sensorReading.update({
+              where: { id: curr.id },
+              data: { processed: true },
+            });
+            lastProcessed = curr;
+
+          } catch (error: any) {
+            console.error(`❌ Prediction error for ${sensor.sensorCode}:`, error.message);
+            if (error.response?.data) {
+              console.error('🔍 Model error details:', error.response.data);
+            }
+            // Consider adding error handling that doesn't break the entire batch
+          }
         }
-
-        await prisma.sensorReading.update({
-          where: { id: curr.id },
-          data: { processed: true },
-        });
-
-        // Update reference for next loop
-        lastProcessed = curr;
-
-      } catch (error: any) {
-        console.error(`❌ Prediction error for ${sensor.sensorCode}:`, error.message);
-        if (error.response?.data) {
-          console.error('🔍 Model error details:', error.response.data);
-        }
-      }
+      });
+    } catch (error) {
+      console.error(`🚨 Error processing sensor ${sensor.sensorCode}:`, error);
     }
   }
 }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+// import prisma from '../lib/prisma';
+// import axios from 'axios';
+// import { AlertType } from '../generated/prisma'; 
+
+// export async function runDetection() {
+//   console.log('🔍 Running event detection...');
+
+//   const sensors = await prisma.sensor.findMany({
+//     include: { vehicle: true },
+//   });
+
+//   for (const sensor of sensors) {
+//     const unprocessedReadings = await prisma.sensorReading.findMany({
+//       where: { sensorId: sensor.id, processed: false },
+//       orderBy: { timestamp: 'asc' },
+//     });
+
+//     if (unprocessedReadings.length === 0) continue;
+    
+
+//     let lastProcessed = await prisma.sensorReading.findFirst({
+//       where: {
+//         sensorId: sensor.id,
+//         processed: true,
+//       },
+//       orderBy: { timestamp: 'desc' },
+//     });
+
+//     for (const curr of unprocessedReadings) {
+//       if (!lastProcessed) {
+//         console.log(`ℹ️ Initializing: marking first reading for ${sensor.sensorCode} as processed.`);
+//         await prisma.sensorReading.update({
+//           where: { id: curr.id },
+//           data: { processed: true },
+//         });
+//         lastProcessed = curr;
+//         continue;
+//       }
+
+//       const input = {
+//         fuelLevel: curr.fuelLevel,
+//         previous_fuel_level: lastProcessed.fuelLevel,
+//         distanceKm: curr.distanceKm ?? 0,
+//         locationLat: curr.locationLat ?? 0,
+//         locationLong: curr.locationLong ?? 0,
+//         timestamp: curr.timestamp.toISOString(),
+//       };
+
+//       try {
+//         const response = await axios.post('http://model-service:5000/predict', input);
+//         const rawPrediction = response.data?.prediction;
+//         const prediction = rawPrediction?.toUpperCase() as AlertType;
+
+//         if (prediction && Object.values(AlertType).includes(prediction)) {
+//           console.log(`✅ Prediction for ${sensor.sensorCode}: ${prediction}`);
+
+//           const notes = `Predicted by ML at ${new Date().toISOString()}`;
+
+//           await prisma.event.create({
+//             data: {
+//               sensorId: sensor.id,
+//               vehicleId: sensor.vehicleId,
+//               type: prediction,
+//               startTime: curr.timestamp,
+//               fuelDropLitres: input.previous_fuel_level - input.fuelLevel,
+//               notes,
+//             },
+//           });
+
+//           await prisma.alert.create({
+//             data: {
+//               type: prediction,
+//               timestamp: curr.timestamp,
+//               description: notes,
+//               locationLat: curr.locationLat,
+//               locationLong: curr.locationLong,
+//               sensorId: sensor.id,
+//             },
+//           });
+//         }
+
+//         await prisma.sensorReading.update({
+//           where: { id: curr.id },
+//           data: { processed: true },
+//         });
+
+//         // Update reference for next loop
+//         lastProcessed = curr;
+
+//       } catch (error: any) {
+//         console.error(`❌ Prediction error for ${sensor.sensorCode}:`, error.message);
+//         if (error.response?.data) {
+//           console.error('🔍 Model error details:', error.response.data);
+//         }
+//       }
+//     }
+//   }
+// }
 
 
 

@@ -10,7 +10,7 @@ export async function getAlerts(req: Request, res: Response) {
     fromDate,
     toDate,
     sort = 'desc',
-    limit = '100',
+    limit = '1000',
     offset = '0',
   } = req.query;
 
