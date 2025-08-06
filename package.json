@@ -14,13 +14,16 @@
   "license": "ISC",
   "type": "commonjs",
   "dependencies": {
+    "@ferimer/teltonika-avl-decoder": "^0.0.6",
     "axios": "^1.10.0",
     "cors": "^2.8.5",
     "dotenv": "^17.2.0",
     "express": "^5.1.0",
+    "fs": "^0.0.1-security",
     "mqtt": "^5.13.2",
     "node-cron": "^4.2.1",
-    "pandas": "^0.0.3"
+    "pandas": "^0.0.3",
+    "teltonika-decoder": "^0.1.1"
   },
   "devDependencies": {
     "@prisma/client": "^6.12.0",

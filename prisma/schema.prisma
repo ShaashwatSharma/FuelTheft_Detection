@@ -1,7 +1,6 @@
 generator client {
   provider      = "prisma-client-js"
-  // output = "../../node_modules/.prisma/client"
-  output = "../src/generated/prisma"
+  output        = "../src/generated/prisma"
   binaryTargets = ["native", "debian-openssl-3.0.x"]
 }
 
@@ -14,16 +13,17 @@ model Vehicle {
   id             String   @id @default(uuid())
   registrationNo String   @unique
   model          String?
-  capacity       Int?
+  tankSize       Int?
   mileageEst     Float?
   createdAt      DateTime @default(now())
 
-  driver  Driver?
-  sensor  Sensor?
-  route   Route?  @relation(fields: [routeId], references: [id])
-  routeId String?
+  driver   Driver?
+  route    Route?   @relation(fields: [routeId], references: [id])
+  routeId  String?
+  sensor   Sensor?
 
-  events Event[]
+  logs     Log[]
+  summaries SummaryMetrics[]
 }
 
 model Driver {
@@ -57,25 +57,29 @@ model Sensor {
   vehicle   Vehicle @relation(fields: [vehicleId], references: [id])
   vehicleId String  @unique
 
-  alerts      Alert[]
-  onOffEvents SensorOnOffEvent[]
-  readings    SensorReading[]
-  events      Event[] // 👈 ADD THIS LINE
+  readings  SensorReading[]
+  alerts    Alert[]
+  logs      Log[]
 }
 
 model SensorReading {
-  id           String   @id @default(uuid())
-  timestamp    DateTime @default(now())
-  fuelLevel    Float
-  distanceKm   Float
-  locationLat  Float
-  locationLong Float
-  processed    Boolean  @default(false) // NEW FIELD
+  id              String   @id @default(uuid())
+  timestamp       DateTime @default(now())
+  fuelLevel       Float
+  distanceKm      Float
+  locationLat     Float
+  locationLong    Float
+  speed           Float
+  ignitionStatus  String?
+  odometer        Float?
+  deviceVoltage   Float?
+  isOverSpeed     Boolean?
+  processed       Boolean  @default(false)
 
   sensor   Sensor @relation(fields: [sensorId], references: [id])
   sensorId String
 
-  @@index([timestamp]) // helpful for time filtering
+  @@index([timestamp])
 }
 
 model Alert {
@@ -90,39 +94,57 @@ model Alert {
   sensorId String
 }
 
-model SensorOnOffEvent {
-  id        String       @id @default(uuid())
-  status    SensorStatus
-  changedBy String?
-  timestamp DateTime     @default(now())
+model Log {
+  id           String   @id @default(uuid())
+  timestamp    DateTime @default(now())
+  message      String
+  level        LogLevel
+  context      String?
+  details      Json?
+  userId       String?
+  requestId    String?
+  actionType   String?
 
-  sensor   Sensor @relation(fields: [sensorId], references: [id])
-  sensorId String
+  vehicle   Vehicle? @relation(fields: [vehicleId], references: [id])
+  vehicleId String?
+
+  sensor    Sensor?  @relation(fields: [sensorId], references: [id])
+  sensorId  String?
 }
 
-model Event {
-  id             String    @id @default(uuid())
-  type           AlertType
-  startTime      DateTime
-  endTime        DateTime?
-  fuelDropLitres Float?
-  notes          String?
+model SummaryMetrics {
+  id                   String   @id @default(uuid())
+  vehicleId             String
+  fromDate              DateTime
+  toDate                DateTime
+  sFuelLevel            Float
+  eFuelLevel            Float
+  totalFuelConsumed     Float
+  totalFuelFills        Float
+  totalFuelDrops        Float
+  kmpl                  Float
+  totalDistanceKm       Float
+  totalRunningHours     Float
+  totalIdleHours        Float
+  totalStoppageHours    Float
+  dropAlert             Boolean  @default(false)
+  fillAlert             Boolean  @default(false)
 
   vehicle   Vehicle @relation(fields: [vehicleId], references: [id])
-  vehicleId String
 
-  sensor   Sensor @relation(fields: [sensorId], references: [id])
-  sensorId String
+  @@index([fromDate, toDate])
 }
 
 enum AlertType {
   THEFT
   REFUEL
   LOW_FUEL
+  SENSOR_HEALTH
   UNKNOWN
 }
 
-enum SensorStatus {
-  ON
-  OFF
+enum LogLevel {
+  INFO
+  WARNING
+  ERROR
 }

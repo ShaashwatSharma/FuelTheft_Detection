@@ -1,13 +1,29 @@
 import mqtt from 'mqtt';
 import prisma from '../lib/prisma';
 import dotenv from 'dotenv';
+// import teltonikaDecoder from 'teltonika-decoder';
+
 
 dotenv.config();
 const TOPIC = 'fuel/readings';
+// const TOPIC ='353691841264129/data'
 const client = mqtt.connect(process.env.MQTT_BROKER_URL || 'mqtt://host.docker.internal:1883');
 
+
+// import fs from 'fs';
+
+// const client = mqtt.connect(process.env.MQTT_BROKER_URL!, {
+//   clientId: '353691841264129',
+//   cert: fs.readFileSync('cert/6f01d7881191873f1eacbc586aadc0dbfbb2df6ea915361a654db53bc137760a-certificate.pem.crt'),
+//   key: fs.readFileSync('cert/6f01d7881191873f1eacbc586aadc0dbfbb2df6ea915361a654db53bc137760a-private.pem.key'),
+//   ca: fs.readFileSync('cert/AmazonRootCA1.pem'),
+// });
+
+
+
+
 client.on('connect', () => {
-  console.log(`✅ Connected to MQTT broker`);
+  console.log(`✅ Connected to MQTT broker/AWS`);
   client.subscribe(TOPIC, err => {
     if (err) console.error('❌ Subscription error:', err);
     else console.log(`📡 Subscribed to topic: ${TOPIC}`);
@@ -17,6 +33,7 @@ client.on('connect', () => {
 client.on('message', async (topic, message) => {
   try {
     const data = JSON.parse(message.toString());
+    // const data = teltonika.parse(message);
     console.log('📥 Received:', data);
 
     const {
