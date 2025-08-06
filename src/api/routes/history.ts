@@ -1,10 +1,11 @@
 import express from 'express';
-import { getAlerts } from '../controllers/alerts';
+import { getHistory } from '../controllers/historycontroller';
 
 const router = express.Router();
 // /alerts?type&fromDate&toDate
-router.get('/', getAlerts);
+router.get('/', getHistory);
 
 
 
 export default router;
+

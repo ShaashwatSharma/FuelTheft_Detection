@@ -1,9 +1,11 @@
 import express from 'express';
 import cors from 'cors';
-import alertRoutes from './routes/alerts';
+
+import historyRoutes from './routes/history';
 import vehicleRoutes from './routes/vehicleRoutes';
 import sensor from './routes/sensor';
 import fuelUsageRoutes from './routes/fuelUsageRoutes';
+
 const app = express();
 const PORT = process.env.PORT || 3000;
 
@@ -11,7 +13,7 @@ app.use(cors());
 app.use(express.json());
 
 app.use('/vehicles', vehicleRoutes);
-app.use('/alerts', alertRoutes);
+app.use('/history', historyRoutes);
 app.use('/sensor', sensor);
 app.use('/fuelusage', fuelUsageRoutes);
 

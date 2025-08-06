@@ -55,9 +55,9 @@ export async function getFuelUsage(req: Request, res: Response) {
           },
           orderBy: { timestamp: 'asc' },
         },
-        events: {
+        histories: {
           where: {
-            startTime: { gte: from, lte: to },
+            timestamp: { gte: from, lte: to },
             type: { in: ['THEFT', 'REFUEL'] },
             fuelDropLitres: { not: null },
           },
@@ -74,7 +74,7 @@ export async function getFuelUsage(req: Request, res: Response) {
     }
 
     const readings = sensor.readings as FuelReading[];
-    const events = sensor.events as FuelEvent[];
+    const events = sensor.histories as FuelEvent[];
 
     let totalFuelStolen = 0;
     let totalFuelRefueled = 0;
@@ -82,7 +82,7 @@ export async function getFuelUsage(req: Request, res: Response) {
     let fuelConsumedFromReadings = 0;
     let detectedRefuelsFromReadings = 0;
 
-    // Process events for theft/refuel
+    // Process histories for theft/refuel
     events.forEach((event) => {
       if (event.type === 'THEFT' && typeof event.fuelDropLitres === 'number') {
         totalFuelStolen += Math.abs(event.fuelDropLitres);
@@ -135,7 +135,6 @@ export async function getFuelUsage(req: Request, res: Response) {
     res.status(500).json({ message: 'Failed to fetch fuel usage' });
   }
 }
-
 
 
 
