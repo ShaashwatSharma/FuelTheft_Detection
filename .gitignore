@@ -6,3 +6,4 @@ dist/
 
 /src/generated/prisma
 .venv310
+/cert
