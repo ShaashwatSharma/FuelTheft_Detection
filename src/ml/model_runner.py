@@ -1,41 +1,144 @@
 # src/ml/model_runner.py
-
-import json
+import os
+from pathlib import Path
 import pandas as pd
 import joblib
+from typing import Any, Dict
 
-# Load model and label encoder
-model = joblib.load("src/ml/model.pkl")
-label_encoder = joblib.load("src/ml/fuel_event_label_encoder_with_noise.pkl")
+DEFAULT_MODEL_NAME = "src/ml/xgb_vehicle_event_augmented.joblib"
 
-def run_prediction(input_data):
-    # Parse timestamp to extract hour and minute
-    timestamp = pd.to_datetime(input_data["timestamp"])
-    hour = timestamp.hour
-    minute = timestamp.minute
+def _resolve_model_path() -> Path:
+    candidates = [
+        Path.cwd() / DEFAULT_MODEL_NAME,
+        Path("/content/") / DEFAULT_MODEL_NAME,
+        Path("src/ml/xgb_vehicle_event_augmented.joblib"),
+    ]
+    for c in candidates:
+        try:
+            if c.is_file():
+                return c
+        except Exception:
+            pass
+    raise FileNotFoundError(f"Could not find model file '{DEFAULT_MODEL_NAME}' in {os.getcwd()}.")
 
-    # Calculate fuel delta
-    fuel_delta = input_data["previous_fuel_level"] - input_data["fuelLevel"]
+try:
+    MODEL_PATH = _resolve_model_path()
+    _loaded = joblib.load(MODEL_PATH)
+    # Support either a plain pipeline or a dict bundle
+    if isinstance(_loaded, dict):
+        pipeline = _loaded.get("pipeline")
+        label_encoder = _loaded.get("label_encoder")
+        features = _loaded.get("features_in_", None)
+    else:
+        pipeline = _loaded
+        label_encoder = None
+        features = None
+    if pipeline is None:
+        raise ValueError("Loaded model bundle has no 'pipeline'.")
+except Exception as e:
+    print(f"[ERROR] Failed to load model: {e}")
+    pipeline = None
+    label_encoder = None
+    features = None
 
-    # Create DataFrame with required features
-    df = pd.DataFrame([{
-        "fuelLevel": input_data["fuelLevel"],
-        "previous_fuel_level": input_data["previous_fuel_level"],
-        "distanceKm": input_data["distanceKm"],
-        "locationLat": input_data["locationLat"],
-        "locationLong": input_data["locationLong"],
-        "hour": hour,
-        "minute": minute,
-        "fuel_delta": fuel_delta,
-    }])
+def run_prediction(input_data: Dict[str, Any]):
+    """
+    input_data expects (at least):
+      fuelLevel, previous_fuel_level, distanceKm, locationLat, locationLong,
+      speed, ignitionStatus, isOverSpeed (bool-ish)
+    We also compute fuel_diff = fuelLevel - previous_fuel_level (0 if missing).
+    """
+    if pipeline is None:
+        return "Error: Model not loaded"
 
-    # Predict and decode label
-    prediction_encoded = model.predict(df)[0]
-    prediction_label = label_encoder.inverse_transform([prediction_encoded])[0]
-    print("🔎 Encoded prediction:", prediction_encoded)
-    print("🔎 Decoded prediction:", prediction_label)
+    # Fallback expected feature list if bundle didn't include one
+    expected_features = features or [
+        "fuelLevel", "previous_fuel_level", "distanceKm", "locationLat",
+        "locationLong", "speed", "ignitionStatus", "isOverSpeed", "fuel_diff"
+    ]
 
-    return prediction_label
+    prev = input_data.get("previous_fuel_level")
+    curr = input_data.get("fuelLevel")
+    try:
+        calculated_fuel_diff = (float(curr) if curr is not None else 0.0) - (float(prev) if prev is not None else 0.0)
+    except Exception:
+        calculated_fuel_diff = 0.0
+
+    row_data = {k: input_data.get(k, None) for k in expected_features}
+    row_data["fuel_diff"] = calculated_fuel_diff
+
+    # Normalize types
+    if "ignitionStatus" in row_data:
+        row_data["ignitionStatus"] = str(row_data.get("ignitionStatus", "Unknown"))
+    if "isOverSpeed" in row_data:
+        row_data["isOverSpeed"] = bool(row_data.get("isOverSpeed", False))
+
+    df = pd.DataFrame([row_data])
+
+    pred_encoded = pipeline.predict(df)[0]
+    if label_encoder is not None:
+        pred_label = label_encoder.inverse_transform([pred_encoded])[0]
+    else:
+        pred_label = pred_encoded
+
+    print("🔎 Prediction:", pred_label)
+    return str(pred_label)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+# import pandas as pd
+# import joblib
+# # Load the trained XGBoost model
+# MODEL_PATH = "src/ml/xgb_vehicle_event_augmented.joblib"
+# model = joblib.load(MODEL_PATH)
+# def run_prediction(input_data):
+#     """
+#     Runs a prediction for a single input row (dictionary of features).
+#     """
+#     # Parse timestamp to extract hour and minute
+#     timestamp = pd.to_datetime(input_data["timestamp"])
+#     hour = timestamp.hour
+#     minute = timestamp.minute
+#     # Calculate fuel delta
+#     fuel_delta = input_data["previous_fuel_level"] - input_data["fuelLevel"]
+#     # Create DataFrame with required features
+#     df = pd.DataFrame([{
+#         "fuelLevel": input_data["fuelLevel"],
+#         "previous_fuel_level": input_data["previous_fuel_level"],
+#         "distanceKm": input_data["distanceKm"],
+#         "locationLat": input_data["locationLat"],
+#         "locationLong": input_data["locationLong"],
+#         "hour": hour,
+#         "minute": minute,
+#         "fuel_delta": fuel_delta,
+#     }])
+#     # Predict label
+#     prediction_label = model.predict(df)[0]
+#     print(":magnifying_glass_right: Prediction:", prediction_label)
+#     return prediction_label
+
+
+
+
+
+
+
 
 
 

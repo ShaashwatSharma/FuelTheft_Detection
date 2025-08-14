@@ -11,6 +11,12 @@ services:
       POSTGRES_DB: fueltheftdb
     volumes:
       - fueltheft_pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U fueladmin -d fueltheftdb -h localhost"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 5s
 
   mqtt:
     image: eclipse-mosquitto
@@ -19,6 +25,31 @@ services:
     ports:
       - "1883:1883"
       - "9001:9001"
+
+  # IMPORTANT: service key must remain "model-service"
+  model-service:
+    container_name: PT-model-api
+    build:
+      context: .
+      dockerfile: model.Dockerfile
+    # Expose inside docker network on 5000; host can hit it on 5001
+    ports:
+      - "5001:5000"
+    restart: unless-stopped
+    environment:
+      # Make Flask import your app at src/ml/app.py
+      - FLASK_APP=src.ml.app
+      - FLASK_RUN_HOST=0.0.0.0
+      - FLASK_RUN_PORT=5000
+      # So "from src.ml.model_runner import run_prediction" works
+      - PYTHONPATH=/app
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request,sys; urllib.request.urlopen('http://localhost:5000/health', timeout=2); sys.exit(0)\""]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 10s
+    # extra DNS not needed here
 
   backend:
     container_name: PT-backend
@@ -32,25 +63,86 @@ services:
       - .:/app
     env_file:
       - docker.env
+    # Optional: help with AWS IoT DNS lookup at container start
+    dns:
+      - 8.8.8.8
+      - 1.1.1.1
     depends_on:
-      - postgres
-      - mqtt
-      - model-service
-    command: npm run dev
-
-  model-service:
-    container_name: PT-model-api
-    build:
-      context: .
-      dockerfile: model.Dockerfile
-    ports:
-      - "5001:5000"
+      postgres:
+        condition: service_healthy
+      mqtt:
+        condition: service_started
+      model-service:
+        condition: service_healthy
     restart: unless-stopped
-    expose:
-      - "5000"
+    command: npm run dev
 
 volumes:
   fueltheft_pg_data:
+
+
+
+
+
+
+
+
+
+
+
+# services:
+#   postgres:
+#     image: postgres:15
+#     container_name: PT-postgres-db
+#     restart: always
+#     ports:
+#       - "5433:5432"
+#     environment:
+#       POSTGRES_USER: fueladmin
+#       POSTGRES_PASSWORD: mysecretpassword
+#       POSTGRES_DB: fueltheftdb
+#     volumes:
+#       - fueltheft_pg_data:/var/lib/postgresql/data
+
+#   mqtt:
+#     image: eclipse-mosquitto
+#     container_name: PT-mqtt-broker
+#     restart: always
+#     ports:
+#       - "1883:1883"
+#       - "9001:9001"
+
+#   backend:
+#     container_name: PT-backend
+#     build:
+#       context: .
+#       dockerfile: Dockerfile
+#     ports:
+#       - "3000:3000"
+#       - "5555:5555"
+#     volumes:
+#       - .:/app
+#     env_file:
+#       - docker.env
+#     depends_on:
+#       - postgres
+#       - mqtt
+#       - model-service
+#     command: npm run dev
+
+#   model-service:
+#     container_name: PT-model-api
+#     build:
+#       context: .
+#       dockerfile: model.Dockerfile
+#     ports:
+#       - "5001:5000"
+#     restart: unless-stopped
+#     expose:
+#       - "5000"
+
+# volumes:
+#   fueltheft_pg_data:
 
 
 

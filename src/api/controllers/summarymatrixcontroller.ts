@@ -8,7 +8,7 @@ export async function getSummaryMetrics(req: Request, res: Response) {
   if (!busId || typeof busId !== 'string') {
     return res.status(400).json({ message: 'Missing or invalid busId' });
   }
-
+       
   let from: Date;
   let to: Date;
   try {
