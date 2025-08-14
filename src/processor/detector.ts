@@ -1,136 +1,455 @@
+// src/processor/detector.ts
 import prisma from '../lib/prisma';
 import axios from 'axios';
-import { AlertType } from '../generated/prisma';
+import { Prisma, type AlertType } from '../generated/prisma';
+
+const MODEL_URL = 'http://model-service:5000/predict';
+const MODEL_TIMEOUT_MS = 10_000;
+
+// Normalize model output -> our enums; anything else -> 'UNKNOWN'
+function normalizePrediction(raw: unknown): AlertType {
+  const s = String(raw ?? '').trim().toUpperCase().replace(/\s+/g, '_'); // "low fuel" -> "LOW_FUEL"
+  if (s === 'THEFT') return 'THEFT';
+  if (s === 'REFUEL') return 'REFUEL';
+  if (s === 'LOW_FUEL') return 'LOW_FUEL';
+  if (s === 'NORMAL') return 'NORMAL';
+  return 'UNKNOWN';
+}
+
+/**
+ * Race-safe, idempotent write: exactly one History per SensorReading.d
+ * Uses History.id = SensorReading.id.
+ * If a parallel writer inserts first (P2002), fall back to update.
+ */
+async function writeHistoryByReadingId(
+  tx: Prisma.TransactionClient,
+  readingId: string,
+  data: {
+    timestamp: Date;
+    type: AlertType;
+    description: string;
+    fuelLevel: number;
+    fuelDropLitres: number | null;
+    vehicleId: string;
+    sensorId: string;
+    locationLat: number;
+    locationLong: number;
+  }
+) {
+  try {
+    await tx.history.upsert({
+      where: { id: readingId },
+      update: {
+        type: data.type,
+        description: data.description,
+        fuelLevel: data.fuelLevel,
+        fuelDropLitres: data.fuelDropLitres,
+        timestamp: data.timestamp,
+        vehicleId: data.vehicleId,
+        sensorId: data.sensorId,
+        locationLat: data.locationLat,
+        locationLong: data.locationLong,
+      },
+      create: {
+        id: readingId,
+        ...data,
+      },
+    });
+  } catch (e: any) {
+    if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === 'P2002') {
+      await tx.history.update({
+        where: { id: readingId },
+        data: {
+          type: data.type,
+          description: data.description,
+          fuelLevel: data.fuelLevel,
+          fuelDropLitres: data.fuelDropLitres,
+          timestamp: data.timestamp,
+          vehicleId: data.vehicleId,
+          sensorId: data.sensorId,
+          locationLat: data.locationLat,
+          locationLong: data.locationLong,
+        },
+      });
+    } else {
+      throw e;
+    }
+  }
+}
 
 export async function runDetection() {
-  console.log('🔍 Running event detection...');
+  console.log('🔍 Running event detection (per-sensor, topic-aware, race-safe)…');
 
+  // Process sensors sequentially (isolation)
   const sensors = await prisma.sensor.findMany({
     include: { vehicle: true },
+    orderBy: { sensorCode: 'asc' },
   });
 
   for (const sensor of sensors) {
     try {
-      const unprocessedReadings = await prisma.sensorReading.findMany({
+      const readings = await prisma.sensorReading.findMany({
         where: { sensorId: sensor.id, processed: false },
         orderBy: { timestamp: 'asc' },
       });
+      if (readings.length === 0) continue;
 
-      if (unprocessedReadings.length === 0) continue;
+      console.log(`▶️  ${sensor.sensorCode}: ${readings.length} readings`);
 
-      let lastProcessed = await prisma.sensorReading.findFirst({
-        where: { sensorId: sensor.id, processed: true },
-        orderBy: { timestamp: 'desc' },
-      });
+      for (const curr of readings) {
+        const topic = curr.topic ?? null; // differentiate streams by topic
+        const topicLabel = topic ?? '(no-topic)';
 
-      await prisma.$transaction(async (tx) => {
-        for (const curr of unprocessedReadings) {
-          if (!lastProcessed) {
-            console.log(`ℹ️ Initializing: marking first reading for ${sensor.sensorCode} as processed.`);
-            await tx.sensorReading.update({
-              where: { id: curr.id },
-              data: { processed: true },
+        // 1) Previous processed strictly BEFORE this ts, on the SAME topic (best)
+        let prev = await prisma.sensorReading.findFirst({
+          where: {
+            sensorId: sensor.id,
+            processed: true,
+            timestamp: { lt: curr.timestamp },
+            fuelLevel: { not: null },
+            topic: topic, // exact match, null-safe
+          },
+          orderBy: { timestamp: 'desc' },
+        });
+
+        // Fallback: any previous processed (first message on a new topic)
+        if (!prev) {
+          prev = await prisma.sensorReading.findFirst({
+            where: {
+              sensorId: sensor.id,
+              processed: true,
+              timestamp: { lt: curr.timestamp },
+              fuelLevel: { not: null },
+            },
+            orderBy: { timestamp: 'desc' },
+          });
+        }
+
+        // Non-null fuel for History (schema requires it)
+        const prevFuel = prev?.fuelLevel ?? (curr.fuelLevel ?? 0);
+        const fuelNow = curr.fuelLevel ?? prevFuel;
+
+        // 2) Model call OUTSIDE any transaction
+        const input = {
+          fuelLevel: fuelNow,
+          previous_fuel_level: prevFuel,
+          distanceKm: curr.distanceKm ?? 0,
+          locationLat: curr.locationLat ?? 0,
+          locationLong: curr.locationLong ?? 0,
+          speed: curr.speed ?? 0,
+          ignitionStatus: curr.ignitionStatus ?? 'UNKNOWN',
+          isOverSpeed: (curr as any).isOverSpeed ?? false,
+          odometer: curr.odometer ?? 0,
+          deviceVoltage: curr.deviceVoltage ?? 0,
+          topic: topic ?? '', // include topic for traceability to the model
+          timestamp: curr.timestamp.toISOString(),
+        };
+
+        let prediction: AlertType = 'UNKNOWN';
+        try {
+          const { data } = await axios.post(MODEL_URL, input, { timeout: MODEL_TIMEOUT_MS });
+          prediction = normalizePrediction(data?.prediction);
+        } catch (err: any) {
+          console.warn(`❌ ${sensor.sensorCode} [${topicLabel}] model error @ ${curr.timestamp.toISOString()}: ${err?.message}`);
+          prediction = 'UNKNOWN';
+        }
+
+        // 3) Delta & description
+        const fuelDropLitres = (prevFuel ?? 0) - (fuelNow ?? 0); // +drop, -refuel
+        const desc =
+          prediction === 'UNKNOWN'
+            ? `[${topicLabel}] ` +
+              (curr.fuelLevel == null ? 'Missing fuelLevel; fallback used' : 'Prediction unavailable or unrecognized')
+            : `[${topicLabel}] ${prediction} | Δ=${(-fuelDropLitres).toFixed(2)}L (curr - prev)`;
+
+        const shouldAlert = prediction === 'THEFT' || prediction === 'REFUEL' || prediction === 'LOW_FUEL';
+
+        // 4) Short transaction: write History (by reading id), optional Alert, mark processed
+        await prisma.$transaction(async (tx) => {
+          await writeHistoryByReadingId(tx, curr.id, {
+            timestamp: curr.timestamp,
+            type: prediction,
+            description: desc, // carries the topic label for debugging/audits
+            fuelLevel: fuelNow,
+            fuelDropLitres,
+            vehicleId: sensor.vehicleId, // Sensor has a required vehicle
+            sensorId: sensor.id,
+            locationLat: curr.locationLat,
+            locationLong: curr.locationLong,
+          });
+
+          if (shouldAlert) {
+            const exists = await tx.alert.findFirst({
+              where: { sensorId: sensor.id, timestamp: curr.timestamp, type: prediction },
+              select: { id: true },
             });
-            lastProcessed = curr;
-            continue;
-          }
-
-          if (curr.fuelLevel === null || curr.fuelLevel === undefined) {
-            console.warn(`⚠️ Skipping reading ${curr.id} for ${sensor.sensorCode}: missing fuelLevel`);
-            continue;
-          }
-
-          const input = {
-            fuelLevel: curr.fuelLevel,
-            previous_fuel_level: lastProcessed?.fuelLevel ?? curr.fuelLevel, // safe default
-            distanceKm: curr.distanceKm ?? 0,
-            locationLat: curr.locationLat ?? 0,
-            locationLong: curr.locationLong ?? 0,
-            speed: curr.speed ?? 0,
-            ignitionStatus: curr.ignitionStatus ?? 'UNKNOWN',
-            isOverSpeed: (curr as any).isOverSpeed ?? false, // include if your schema has it
-            odometer: curr.odometer ?? 0,
-            deviceVoltage: curr.deviceVoltage ?? 0,
-            timestamp: curr.timestamp.toISOString(),
-          };
-
-          try {
-            const response = await axios.post('http://model-service:5000/predict', input, {
-              timeout: 10_000,
-            });
-            const rawPrediction = response.data?.prediction;
-            const prediction = (rawPrediction?.toString()?.toUpperCase() ?? '') as AlertType;
-
-            // Only create alerts for meaningful events; adjust to your enum
-            const createAlert =
-              prediction === 'THEFT' || prediction === 'REFUEL' || prediction === 'NORMAL';
-
-            if (createAlert) {
-              console.log(`✅ Prediction for ${sensor.sensorCode}: ${prediction}`);
-
-              const notes = `Predicted by ML at ${new Date().toISOString()}`;
-
-              // FIX: correct fuel drop (previous - current)
-              const fuelDropLitres = (input.previous_fuel_level ?? 0) - input.fuelLevel;
-
+            if (!exists) {
               await tx.alert.create({
                 data: {
                   type: prediction,
                   timestamp: curr.timestamp,
-                  description: `${notes} | Drop: ${fuelDropLitres.toFixed(2)}L`,
+                  description: `[${topicLabel}] ML @ ${new Date().toISOString()} | ${
+                    fuelDropLitres >= 0 ? 'Drop' : 'Refuel'
+                  }: ${Math.abs(fuelDropLitres).toFixed(2)}L`,
                   locationLat: curr.locationLat,
                   locationLong: curr.locationLong,
                   sensorId: sensor.id,
                 },
               });
-
-              await tx.history.create({
-                data: {
-                  timestamp: curr.timestamp,
-                  type: prediction,
-                  description: `${prediction} detected | Drop: ${fuelDropLitres.toFixed(2)}L`,
-                  fuelLevel: curr.fuelLevel,
-                  fuelDropLitres,
-                  vehicleId: sensor.vehicleId,
-                  sensorId: sensor.id,
-                  locationLat: curr.locationLat,
-                  locationLong: curr.locationLong,
-                },
-              });
             }
-
-            await tx.sensorReading.update({
-              where: { id: curr.id },
-              data: { processed: true },
-            });
-            lastProcessed = curr;
-          } catch (error: any) {
-            console.error(`❌ Prediction error for ${sensor.sensorCode}:`, error.message);
-            if (error.response?.data) {
-              console.error('🔍 Model error details:', error.response.data);
-            }
-
-            // Avoid enum mismatch—log the failure as a NORMAL (or add UNKNOWN to your enum)
-            await tx.history.create({
-              data: {
-                timestamp: curr.timestamp,
-                type: 'NORMAL' as AlertType, // safer than 'UNKNOWN' unless your enum includes UNKNOWN
-                description: `Prediction failed: ${error.message}`,
-                fuelLevel: curr.fuelLevel,
-                vehicleId: sensor.vehicleId,
-                sensorId: sensor.id,
-                locationLat: curr.locationLat,
-                locationLong: curr.locationLong,
-              },
-            });
           }
-        }
-      });
-    } catch (error) {
-      console.error(`🚨 Error processing sensor ${sensor.sensorCode}:`, error);
+
+          await tx.sensorReading.update({
+            where: { id: curr.id },
+            data: { processed: true },
+          });
+        });
+      }
+
+      console.log(`✅ ${sensor.sensorCode}: done`);
+    } catch (err) {
+      console.error(`🚨 Error processing sensor ${sensor.sensorCode}:`, err);
     }
   }
+
+  console.log('🏁 Detection pass complete.');
 }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+// // src/processor/detector.ts
+// import prisma from '../lib/prisma';
+// import axios from 'axios';
+// import { AlertType } from '../generated/prisma';
+
+// const MODEL_URL = 'http://model-service:5000/predict';
+// const MODEL_TIMEOUT_MS = 10_000;
+
+// // Map model output; anything else -> UNKNOWN
+// function normalizePrediction(raw: unknown): AlertType {
+//   const s = String(raw ?? '').trim().toUpperCase().replace(/\s+/g, '_'); // "LOW FUEL" -> "LOW_FUEL"
+//   if (s === 'THEFT') return 'THEFT';
+//   if (s === 'REFUEL') return 'REFUEL';
+//   if (s === 'LOW_FUEL') return 'LOW_FUEL';
+//   if (s === 'NORMAL') return 'NORMAL';
+//   return 'UNKNOWN';
+// }
+
+// export async function runDetection() {
+//   console.log('🔍 Running event detection (no long transactions)…');
+
+//   const sensors = await prisma.sensor.findMany({ include: { vehicle: true } });
+//   for (const sensor of sensors) {
+//     try {
+//       const unprocessed = await prisma.sensorReading.findMany({
+//         where: { sensorId: sensor.id, processed: false },
+//         orderBy: { timestamp: 'asc' },
+//       });
+//       if (unprocessed.length === 0) continue;
+
+//       // Latest processed for delta baseline
+//       let lastProcessed = await prisma.sensorReading.findFirst({
+//         where: { sensorId: sensor.id, processed: true },
+//         orderBy: { timestamp: 'desc' },
+//       });
+
+//       for (const curr of unprocessed) {
+//         // 1) First-ever reading -> create baseline history and mark processed
+//         if (!lastProcessed) {
+//           const baseFuel = curr.fuelLevel ?? 0; // History.fuelLevel required by schema
+//           await prisma.$transaction(async (tx) => {
+//             await tx.history.upsert({
+//               where: { id: curr.id },
+//               update: {},
+//               create: {
+//                 id: curr.id,
+//                 timestamp: curr.timestamp,
+//                 type: 'UNKNOWN',
+//                 description: 'Initialized baseline reading',
+//                 fuelLevel: baseFuel,
+//                 fuelDropLitres: null,
+//                 vehicleId: sensor.vehicleId,
+//                 sensorId: sensor.id,
+//                 locationLat: curr.locationLat,
+//                 locationLong: curr.locationLong,
+//               },
+//             });
+//             await tx.sensorReading.update({ where: { id: curr.id }, data: { processed: true } });
+//           });
+//           lastProcessed = curr;
+//           continue;
+//         }
+
+//         // 2) If fuelLevel is missing -> still write a History row (use fallback), mark processed
+//         if (curr.fuelLevel == null) {
+//           const fallback = lastProcessed?.fuelLevel ?? 0;
+//           await prisma.$transaction(async (tx) => {
+//             await tx.history.upsert({
+//               where: { id: curr.id },
+//               update: {
+//                 type: 'UNKNOWN',
+//                 description: `Skipped: missing fuelLevel (fallback=${fallback})`,
+//                 fuelLevel: fallback,
+//                 fuelDropLitres: null,
+//                 timestamp: curr.timestamp,
+//                 vehicleId: sensor.vehicleId,
+//                 sensorId: sensor.id,
+//                 locationLat: curr.locationLat,
+//                 locationLong: curr.locationLong,
+//               },
+//               create: {
+//                 id: curr.id,
+//                 type: 'UNKNOWN',
+//                 description: `Skipped: missing fuelLevel (fallback=${fallback})`,
+//                 fuelLevel: fallback,
+//                 fuelDropLitres: null,
+//                 timestamp: curr.timestamp,
+//                 vehicleId: sensor.vehicleId,
+//                 sensorId: sensor.id,
+//                 locationLat: curr.locationLat,
+//                 locationLong: curr.locationLong,
+//               },
+//             });
+//             await tx.sensorReading.update({ where: { id: curr.id }, data: { processed: true } });
+//           });
+//           // keep lastProcessed as-is (no real fuel)
+//           continue;
+//         }
+
+//         // 3) Build input and call model OUTSIDE any TX
+//         const prevFuel = lastProcessed?.fuelLevel ?? curr.fuelLevel;
+//         const input = {
+//           fuelLevel: curr.fuelLevel,
+//           previous_fuel_level: prevFuel,
+//           distanceKm: curr.distanceKm ?? 0,
+//           locationLat: curr.locationLat ?? 0,
+//           locationLong: curr.locationLong ?? 0,
+//           speed: curr.speed ?? 0,
+//           ignitionStatus: curr.ignitionStatus ?? 'UNKNOWN',
+//           isOverSpeed: (curr as any).isOverSpeed ?? false,
+//           odometer: curr.odometer ?? 0,
+//           deviceVoltage: curr.deviceVoltage ?? 0,
+//           timestamp: curr.timestamp.toISOString(),
+//         };
+
+//         let prediction: AlertType = 'UNKNOWN';
+//         let fuelDropLitres = (prevFuel ?? 0) - (curr.fuelLevel ?? 0);
+
+//         try {
+//           const { data } = await axios.post(MODEL_URL, input, { timeout: MODEL_TIMEOUT_MS });
+//           prediction = normalizePrediction(data?.prediction);
+//         } catch (err: any) {
+//           console.error(`❌ Prediction error for ${sensor.sensorCode}:`, err.message);
+//           if (err.response?.data) console.error('🔍 Model error details:', err.response.data);
+//           // leave prediction as UNKNOWN
+//         }
+
+//         const notes = `ML @ ${new Date().toISOString()}`;
+//         const shouldAlert = prediction === 'THEFT' || prediction === 'REFUEL' || prediction === 'LOW_FUEL';
+
+//         // 4) SHORT per-reading transaction: write History (+Alert) and mark processed
+//         await prisma.$transaction(async (tx) => {
+//           // History: exactly one per reading (id=reading.id)
+//           await tx.history.upsert({
+//             where: { id: curr.id },
+//             update: {
+//               type: prediction,
+//               description:
+//                 prediction === 'UNKNOWN'
+//                   ? 'Prediction unavailable or unrecognized'
+//                   : `${prediction} | Δ=${(-fuelDropLitres).toFixed(2)}L (curr - prev)`,
+//               fuelLevel: curr.fuelLevel!, // non-null here
+//               fuelDropLitres,
+//               timestamp: curr.timestamp,
+//               vehicleId: sensor.vehicleId,
+//               sensorId: sensor.id,
+//               locationLat: curr.locationLat,
+//               locationLong: curr.locationLong,
+//             },
+//             create: {
+//               id: curr.id,
+//               type: prediction,
+//               description:
+//                 prediction === 'UNKNOWN'
+//                   ? 'Prediction unavailable or unrecognized'
+//                   : `${prediction} | Δ=${(-fuelDropLitres).toFixed(2)}L (curr - prev)`,
+//               fuelLevel: curr.fuelLevel!,
+//               fuelDropLitres,
+//               timestamp: curr.timestamp,
+//               vehicleId: sensor.vehicleId,
+//               sensorId: sensor.id,
+//               locationLat: curr.locationLat,
+//               locationLong: curr.locationLong,
+//             },
+//           });
+
+//           // Alert only for meaningful events; avoid duplicates by checking once
+//           if (shouldAlert) {
+//             const exists = await tx.alert.findFirst({
+//               where: { sensorId: sensor.id, timestamp: curr.timestamp, type: prediction },
+//               select: { id: true },
+//             });
+//             if (!exists) {
+//               await tx.alert.create({
+//                 data: {
+//                   type: prediction,
+//                   timestamp: curr.timestamp,
+//                   description: `${notes} | ${fuelDropLitres >= 0 ? 'Drop' : 'Refuel'}: ${Math.abs(fuelDropLitres).toFixed(2)}L`,
+//                   locationLat: curr.locationLat,
+//                   locationLong: curr.locationLong,
+//                   sensorId: sensor.id,
+//                 },
+//               });
+//             }
+//           }
+
+//           // Mark processed LAST so reruns can't double-write
+//           await tx.sensorReading.update({ where: { id: curr.id }, data: { processed: true } });
+//         });
+
+//         // advance previous pointer (we had a real fuel value)
+//         lastProcessed = curr;
+//       }
+//     } catch (e) {
+//       console.error(`🚨 Error processing sensor ${sensor.sensorCode}:`, e);
+//     }
+//   }
+
+//   console.log('✅ Detection pass complete.');
+// }
 
 
 
