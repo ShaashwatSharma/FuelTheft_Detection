@@ -23,17 +23,19 @@
     "mqtt": "^5.13.2",
     "node-cron": "^4.2.1",
     "pandas": "^0.0.3",
-    "teltonika-decoder": "^0.1.1"
+    "teltonika-decoder": "^0.1.1",
+    "yargs": "^18.0.0"
   },
   "devDependencies": {
-    "@prisma/client": "^6.12.0",
+    "@prisma/client": "^6.14.0",
     "@types/cors": "^2.8.19",
     "@types/express": "^5.0.3",
     "@types/node": "^24.0.13",
+    "@types/yargs": "^17.0.33",
     "i": "^0.3.7",
     "nodemon": "^3.1.10",
     "npm": "^11.4.2",
-    "prisma": "^6.12.0",
+    "prisma": "^6.14.0",
     "ts-node": "^10.9.2",
     "typescript": "^5.8.3"
   }

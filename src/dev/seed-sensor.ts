@@ -1,316 +1,324 @@
-/* prisma/seed.ts */
-import { PrismaClient } from '../generated/prisma';
+#!/usr/bin/env ts-node
+
+/**
+ * Minimal dataset generator (TypeScript) that writes SensorReading rows using Prisma.
+ * Mirrors the Python script's behavior, adapted to your Prisma schema.
+ *
+ * Usage:
+ *   ts-node scripts/generateMinimalDataset.ts \
+ *     --sensors 5 \
+ *     --hours 24 \
+ *     --freq 5 \
+ *     --seed 2025 \
+ *     --theft_prob 0.004 \
+ *     --refuel_prob 0.003 \
+ *     --drop_prob 0.008
+ *
+ * Notes:
+ * - Requires existing Sensors in DB. Use --sensors to choose how many to use (from earliest by sensorCode).
+ * - Creates topic per sensor: `sensors/<sensorCode>`.
+ * - Satisfies non-null fields in SensorReading.
+ */
+
+import { PrismaClient } from '../generated/prisma'; // adjust path if needed
+import yargs from 'yargs';
+import { hideBin } from 'yargs/helpers';
+
+// ---------- CLI ----------
+const argv = yargs(hideBin(process.argv))
+  .option('sensors', { type: 'number', default: 4, describe: 'Number of sensors to simulate' })
+  .option('hours', { type: 'number', default: 12, describe: 'Total simulation horizon in hours' })
+  .option('freq', { type: 'number', default: 5, describe: 'Reading frequency (minutes)' })
+  .option('seed', { type: 'number', default: 2025, describe: 'PRNG seed' })
+  .option('theft_prob', { type: 'number', default: 0.004, describe: 'Probability of a theft event per tick' })
+  .option('refuel_prob', { type: 'number', default: 0.003, describe: 'Probability of a refuel event per tick' })
+  .option('drop_prob', { type: 'number', default: 0.008, describe: 'Probability of a small drop event per tick' })
+  .option('base_lat', { type: 'number', default: 12.9716, describe: 'Base latitude' })
+  .option('base_lon', { type: 'number', default: 77.5946, describe: 'Base longitude' })
+  .help()
+  .strict()
+  .parseSync();
 
 const prisma = new PrismaClient();
 
-// ---------- Config ----------
-const SENSORS_COUNT = 10;
-
-const DAYS = 8;                         // today + last 7 days
-const ENTRIES_PER_DAY = 20;             // 48 entries/day => every 30 minutes
-const DAY_MS = 24 * 60 * 60 * 1000;
-const STEP_MS = 30 * 60 * 1000;         // ← fixed 30 minutes
-const TOTAL_STEPS = DAYS * ENTRIES_PER_DAY;
-
-const MIN_CAP = 250;
-const MAX_CAP = 300;
-const INIT_MIN = 100;
-const INIT_MAX = 150;
-const NORMAL_BURN_MIN = 0.4;   // L per step
-const NORMAL_BURN_MAX = 1.5;   // L per step (≤1.5)
-const THEFT_DROP_MIN = 15;     // sudden drop
-const THEFT_DROP_MAX = 30;
-const REFUEL_ADD_MIN = 40;
-const REFUEL_ADD_MAX = 120;
+// ---------- PRNG (deterministic) ----------
+function mulberry32(seed: number) {
+  let t = seed >>> 0;
+  return function () {
+    t += 0x6D2B79F5;
+    let r = Math.imul(t ^ (t >>> 15), 1 | t);
+    r ^= r + Math.imul(r ^ (r >>> 7), 61 | r);
+    return ((r ^ (r >>> 14)) >>> 0) / 4294967296;
+  };
+}
+const rand = mulberry32(argv.seed);
 
 function randFloat(min: number, max: number, dp = 2) {
-  return parseFloat((min + Math.random() * (max - min)).toFixed(dp));
+  const v = min + (max - min) * rand();
+  const f = parseFloat(v.toFixed(dp));
+  return f;
 }
 function randInt(min: number, max: number) {
-  return Math.floor(min + Math.random() * (max - min + 1));
+  return Math.floor(min + (max - min + 1) * rand());
+}
+function randNormal(mean = 0, sd = 1) {
+  // Box-Muller
+  let u = 0, v = 0;
+  while (u === 0) u = rand();
+  while (v === 0) v = rand();
+  const z = Math.sqrt(-2.0 * Math.log(u)) * Math.cos(2.0 * Math.PI * v);
+  return mean + z * sd;
 }
 function clamp(n: number, lo: number, hi: number) {
   return Math.max(lo, Math.min(hi, n));
 }
-function interp(a: number, b: number, t: number) {
-  return a + (b - a) * t;
+
+// ---------- Helpers ----------
+function truncateToFreqUTC(date: Date, minutes: number) {
+  const d = new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate(), date.getUTCHours(), date.getUTCMinutes(), 0, 0));
+  const m = d.getUTCMinutes();
+  const remainder = m % minutes;
+  if (remainder !== 0) d.setUTCMinutes(m - remainder, 0, 0);
+  return d;
 }
 
-type RouteCoord = { name: string; start: [number, number]; end: [number, number] };
+type SensorLite = { id: string; sensorCode: string; vehicleId: string; };
 
-// A few India-ish city pairs for variety (approx coords)
-const routeCoords: RouteCoord[] = [
-  { name: 'Bengaluru → Mysuru',    start: [12.9716, 77.5946], end: [12.2958, 76.6394] },
-  { name: 'Delhi → Agra',          start: [28.7041, 77.1025], end: [27.1767, 78.0081] },
-  { name: 'Mumbai → Pune',         start: [19.0760, 72.8777], end: [18.5204, 73.8567] },
-  { name: 'Jaipur → Ajmer',        start: [26.9124, 75.7873], end: [26.4499, 74.6399] },
-  { name: 'Chennai → Vellore',     start: [13.0827, 80.2707], end: [12.9165, 79.1325] },
-  { name: 'Kolkata → Kharagpur',   start: [22.5726, 88.3639], end: [22.3460, 87.2319] },
-  { name: 'Hyderabad → Warangal',  start: [17.3850, 78.4867], end: [17.9689, 79.5941] },
-  { name: 'Bhopal → Indore',       start: [23.2599, 77.4126], end: [22.7196, 75.8577] },
-  { name: 'Surat → Vadodara',      start: [21.1702, 72.8311], end: [22.3072, 73.1812] },
-  { name: 'Lucknow → Kanpur',      start: [26.8467, 80.9462], end: [26.4499, 80.3319] },
-];
-
-async function wipeAll() {
-  await prisma.alert.deleteMany();
-  await prisma.history.deleteMany();
-  await prisma.sensorReading.deleteMany();
-  await prisma.summaryMetrics.deleteMany();
-  await prisma.sensor.deleteMany();
-  await prisma.driver.deleteMany();
-  await prisma.vehicle.deleteMany();
-  await prisma.route.deleteMany();
-}
-
-function regNo(i: number) {
-  const states = ['KA', 'DL', 'MH', 'RJ', 'TN', 'WB', 'TS', 'MP', 'GJ', 'UP'];
-  const state = states[i % states.length];
-  const series = String.fromCharCode(65 + (i % 26)) + String.fromCharCode(65 + ((i + 3) % 26));
-  const num = (1000 + i).toString();
-  return `${state}01${series}${num}`;
-}
-function phone(i: number) {
-  return `90000${(10000 + i).toString().slice(-5)}`;
-}
-function license(i: number) {
-  return `DL-${(100000 + i).toString()}`;
-}
-
-async function createEntities() {
-  const routes = [];
-  const vehicles = [];
-  const drivers = [];
-  const sensors = [];
-
-  for (let i = 0; i < SENSORS_COUNT; i++) {
-    const rcoord = routeCoords[i % routeCoords.length];
-
-    const route = await prisma.route.create({
-      data: {
-        name: `${rcoord.name} #${i + 1}`,
-        startPoint: rcoord.name.split('→')[0].trim(),
-        endPoint: rcoord.name.split('→')[1].trim(),
-      },
-    });
-    routes.push(route);
-
-    const tankSize = randInt(MIN_CAP, MAX_CAP);
-    const vehicle = await prisma.vehicle.create({
-      data: {
-        registrationNo: regNo(i),
-        model: `LX-${2020 + (i % 5)}`,
-        tankSize,
-        mileageEst: randFloat(3.5, 8.5, 2),
-        route: { connect: { id: route.id } },
-      },
-    });
-    vehicles.push(vehicle);
-
-    const driver = await prisma.driver.create({
-      data: {
-        name: `Driver ${i + 1}`,
-        phone: phone(i),
-        licenseNo: license(i),
-        vehicle: { connect: { id: vehicle.id } },
-      },
-    });
-    drivers.push(driver);
-
-    const sensor = await prisma.sensor.create({
-      data: {
-        sensorCode: `S-${(i + 1).toString().padStart(4, '0')}`,
-        isActive: true,
-        installedAt: new Date(Date.now() - 10 * DAY_MS),
-        lastSeen: new Date(),
-        vehicle: { connect: { id: vehicle.id } },
-      },
-    });
-    sensors.push(sensor);
+async function pickSensors(limit: number): Promise<SensorLite[]> {
+  const sensors = await prisma.sensor.findMany({
+    orderBy: { sensorCode: 'asc' },
+    select: { id: true, sensorCode: true, vehicleId: true },
+    take: limit,
+  });
+  if (sensors.length < limit) {
+    throw new Error(`Requested ${limit} sensors but only found ${sensors.length}. Create sensors first or lower --sensors.`);
   }
-
-  return { routes, vehicles, drivers, sensors };
+  return sensors;
 }
 
-type Scenario = {
-  capacity: number;
-  initFuel: number;
-  theftAtStep: number;     // global step index where theft occurs
-  theftDrop: number;
-  refuelThreshold: number; // 50 or 20
-  refuelAdded: number;
-};
+/**
+ * Generate readings for one sensor and insert in batches.
+ */
+async function generateForSensor(sensor: SensorLite, opts: {
+  startUTC: Date;
+  periods: number;
+  freqMinutes: number;
+  theftProb: number;
+  refuelProb: number;
+  dropProb: number;
+  baseLat: number;
+  baseLon: number;
+}) {
+  // Vehicle/sensor-specific dynamics
+  const tankSize = randFloat(150, 350, 2);
+  const mileageKmPerL = randFloat(2.5, 5.0, 2);
+  let fuel = randFloat(0.5 * tankSize, 0.9 * tankSize, 2);
+  let prevFuel = fuel;
 
-function buildScenario(sensorIndex: number, capacity: number): Scenario {
-  const initFuel = randFloat(INIT_MIN, INIT_MAX, 2);
-  const theftAtStep = randInt(10, 20); // early theft after ~5–10 hours
-  const theftDrop = randFloat(THEFT_DROP_MIN, THEFT_DROP_MAX, 2);
-  const refuelThreshold = (sensorIndex % 2 === 0) ? 50 : 20;
-  const refuelAdded = randFloat(REFUEL_ADD_MIN, REFUEL_ADD_MAX, 2);
-  return { capacity, initFuel, theftAtStep, theftDrop, refuelThreshold, refuelAdded };
-}
+  // Start position: slight jitter from base
+  let lat = opts.baseLat + randNormal(0, 0.01);
+  let lon = opts.baseLon + randNormal(0, 0.01);
 
-async function seedReadingsForSensor(
-  sensorIdx: number,
-  sensorId: string,
-  sensorCode: string,
-  vehicleTank: number,
-  startMidnightUTC: Date,
-  route: RouteCoord
-) {
-  const readings: any[] = [];
-  const scenario = buildScenario(sensorIdx, vehicleTank);
-
-  let fuel = scenario.initFuel;
-  let odometerKm = randFloat(10000, 50000, 2); // starting odo km
+  // Synthetic odometer (km)
+  let odometerKm = randFloat(5000, 80000, 2);
   let angle = randInt(0, 359);
-  const refuelThreshold = scenario.refuelThreshold;
 
-  let refueled = false;            // single threshold-based refuel
-  let pendingZeroRefuel = false;   // refuel to ~200L on next reading after hitting 0
+  const BATCH: any[] = [];
+  const BATCH_SIZE = 1000;
 
-  for (let d = 0; d < DAYS; d++) {
-    for (let k = 0; k < ENTRIES_PER_DAY; k++) {
-      const globalStep = d * ENTRIES_PER_DAY + k;
-      const ts = new Date(startMidnightUTC.getTime() + d * DAY_MS + k * STEP_MS);
-      const tNorm = TOTAL_STEPS > 1 ? globalStep / (TOTAL_STEPS - 1) : 0;
+  for (let i = 0; i < opts.periods; i++) {
+    const t = new Date(opts.startUTC.getTime() + i * opts.freqMinutes * 60_000);
+    const hour = t.getUTCHours();
 
-      // Position along route with slight jitter
-      const latBase = interp(route.start[0], route.end[0], tNorm);
-      const lonBase = interp(route.start[1], route.end[1], tNorm);
-      const lat = +(latBase + randFloat(-0.005, 0.005, 6)).toFixed(6);
-      const lon = +(lonBase + randFloat(-0.005, 0.005, 6)).toFixed(6);
+    // Day/night movement pattern
+    const isDay = hour >= 6 && hour <= 21;
+    const meanSpeed = isDay ? 32.0 : 5.0;
+    const speedSd = 10.0;
+    const moveFlag = rand() > (isDay ? 0.25 : 0.7);
+    const rawSpeed = moveFlag ? Math.max(0, randNormal(meanSpeed, speedSd)) : 0;
+    const speed = parseFloat(rawSpeed.toFixed(2));
 
-      // Driving pattern
-      const hour = ts.getUTCHours();
-      const isDrivingHour = hour >= 1 && hour <= 18;
-      const speed = isDrivingHour ? randFloat(15, 60, 2) : randFloat(0, 5, 2);
-      const distanceKm = +(speed * (STEP_MS / (60 * 60 * 1000))).toFixed(3);
-      odometerKm = +(odometerKm + distanceKm).toFixed(3);
-      angle = (angle + randInt(-25, 25) + 360) % 360;
+    const distanceKm = parseFloat((speed * (opts.freqMinutes / 60.0)).toFixed(3));
+    odometerKm = parseFloat((odometerKm + distanceKm).toFixed(3));
 
-      // GNSS & power
-      const sats = isDrivingHour ? randInt(7, 12) : randInt(4, 10);
-      const hdop = randFloat(0.7, 2.5, 2);
-      const pdop = randFloat(1.2, 4.0, 2);
-      const altitude = randFloat(150, 600, 1);
-      const priority = randInt(0, 3);
-      const deviceVoltage = randFloat(12.0, 14.4, 2);
-      const ignitionStatus = speed > 2 ? 'ON' : 'OFF';
-      const topic = `sensors/${sensorCode}`;
+    // Expected burn from driving
+    const expectedBurn = mileageKmPerL > 1e-3 ? distanceKm / mileageKmPerL : 0;
 
-      // -------- FUEL MODEL --------
-      let fuelDelta = 0;
-      let rawEventId = 0; // 0=normal, 1=theft, 2=refuel
+    // Random events
+    let eventType: 'NORMAL' | 'THEFT' | 'REFUEL' | 'DROP' = 'NORMAL';
+    let theftDrop = 0.0;
+    let refuelAdd = 0.0;
 
-      if (pendingZeroRefuel) {
-        const target = clamp(randFloat(190, 210, 2), 10, scenario.capacity);
-        fuelDelta = +(target - fuel).toFixed(2); // fuel is 0 here
-        rawEventId = 2;
-        pendingZeroRefuel = false;
-      } else if (globalStep === scenario.theftAtStep) {
-        fuelDelta = -scenario.theftDrop;
-        rawEventId = 1;
-      } else if (!refueled && fuel <= refuelThreshold) {
-        const room = scenario.capacity - fuel;
-        const add = clamp(scenario.refuelAdded, 10, Math.max(10, room));
-        fuelDelta = +add.toFixed(2);
-        refueled = true;
-        rawEventId = 2;
+    const r = rand();
+    if (r < opts.theftProb && fuel > 10) {
+      theftDrop = randFloat(5.0, Math.min(30.0, fuel), 2);
+      eventType = 'THEFT';
+    } else {
+      const r2 = rand();
+      if (r2 < opts.refuelProb && fuel < tankSize * 0.95) {
+        refuelAdd = randFloat(10.0, Math.min(60.0, tankSize - fuel), 2);
+        eventType = 'REFUEL';
       } else {
-        fuelDelta = -randFloat(NORMAL_BURN_MIN, NORMAL_BURN_MAX, 2);
+        const r3 = rand();
+        if (r3 < opts.dropProb && fuel > 5.0) {
+          theftDrop = randFloat(1.0, Math.min(5.0, fuel), 2);
+          eventType = 'DROP';
+        }
       }
-
-      let newFuel = clamp(+((fuel + fuelDelta)).toFixed(2), 0, scenario.capacity);
-      if (newFuel <= 0) {
-        newFuel = 0;
-        pendingZeroRefuel = true; // force ~200L next tick
-      }
-
-      readings.push({
-        timestamp: ts,
-        fuelLevel: newFuel,
-        distanceKm: distanceKm,
-        locationLat: lat,
-        locationLong: lon,
-        speed: speed,
-        ignitionStatus,
-        odometer: +odometerKm.toFixed(3),
-        deviceVoltage,
-        sats,
-        hdop,
-        pdop,
-        angle,
-        altitude,
-        priority,
-        eventId: rawEventId,
-        raw: {
-          source: 'seed',
-          globalStep,
-          scenario: {
-            initFuel: scenario.initFuel,
-            theftAtStep: scenario.theftAtStep,
-            theftDrop: scenario.theftDrop,
-            refuelThreshold,
-            refuelAdded: scenario.refuelAdded,
-            capacity: scenario.capacity,
-          },
-          appliedDelta: fuelDelta,
-        },
-        topic,
-        processed: false,
-        sensorId,
-      });
-
-      fuel = newFuel;
     }
+
+    const noise = randNormal(0, 0.15);
+    let newFuel = fuel - expectedBurn - theftDrop + refuelAdd + noise;
+    newFuel = clamp(parseFloat(newFuel.toFixed(2)), 0, tankSize);
+
+    // Move position slightly
+    if (speed > 0.5) {
+      lat += randNormal(0, 0.0015);
+      lon += randNormal(0, 0.0015);
+    } else {
+      lat += randNormal(0, 0.0002);
+      lon += randNormal(0, 0.0002);
+    }
+    const locationLat = parseFloat(lat.toFixed(6));
+    const locationLong = parseFloat(lon.toFixed(6));
+
+    // Other telemetry
+    const ignitionStatus = speed > 0.5 ? 'ON' : 'OFF';
+    const isOverSpeed = speed > 80.0;
+    const sats = isDay ? randInt(7, 12) : randInt(4, 10);
+    const hdop = randFloat(0.7, 2.5, 2);
+    const pdop = randFloat(1.2, 4.0, 2);
+    const altitude = randFloat(150, 600, 1);
+    const priority = randInt(0, 3);
+    const deviceVoltage = randFloat(12.0, 14.4, 2);
+    angle = (angle + randInt(-25, 25) + 360) % 360;
+
+    const fuel_diff = parseFloat((newFuel - prevFuel).toFixed(2));
+
+    // Map event type to an integer for eventId
+    // 0=normal, 1=theft, 2=refuel, 3=drop
+    const eventId =
+      eventType === 'THEFT' ? 1 :
+      eventType === 'REFUEL' ? 2 :
+      eventType === 'DROP' ? 3 : 0;
+
+    // Topic per sensor
+    const topic = `sensors/${sensor.sensorCode}`;
+
+    // Build SensorReading row (all non-nullable fields filled)
+    BATCH.push({
+      timestamp: t,
+      fuelLevel: newFuel,
+      distanceKm,
+      locationLat,
+      locationLong,
+      speed,
+      ignitionStatus,
+      odometer: odometerKm,
+      deviceVoltage,
+      sats,
+      hdop,
+      pdop,
+      angle,
+      altitude,
+      priority,
+      eventId,
+      raw: {
+        source: 'ts-generator',
+        seed: argv.seed,
+        sim: {
+          tankSize,
+          mileageKmPerL,
+          expectedBurn,
+          theftDrop,
+          refuelAdd,
+          noise,
+          eventType,
+          fuel_diff,
+          isOverSpeed,
+        },
+      },
+      topic,
+      processed: false,
+      sensorId: sensor.id,
+    });
+
+    // Flush periodically to keep memory/SQL payload reasonable
+    if (BATCH.length >= BATCH_SIZE) {
+      await prisma.sensorReading.createMany({ data: BATCH, skipDuplicates: true });
+      BATCH.length = 0;
+    }
+
+    prevFuel = newFuel;
+    fuel = newFuel;
   }
 
-  await prisma.sensorReading.createMany({ data: readings });
+  if (BATCH.length > 0) {
+    await prisma.sensorReading.createMany({ data: BATCH, skipDuplicates: true });
+  }
 }
 
 async function main() {
-  console.log('🧽 Wiping existing data…');
-  await wipeAll();
+  const {
+    sensors: sensorsCount,
+    hours,
+    freq,
+    theft_prob,
+    refuel_prob,
+    drop_prob,
+    base_lat,
+    base_lon,
+  } = argv;
 
-  console.log('🚚 Creating routes, vehicles, drivers, sensors…');
-  const { sensors, vehicles } = await createEntities();
-
-  // Start at **today's midnight UTC - 7 days** → covers last 7 days + today
+  // Align start time to the frequency (UTC), matching python's "now() in UTC"
   const now = new Date();
-  const todayMidnightUTC = new Date(Date.UTC(
-    now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), 0, 0, 0, 0
-  ));
-  const start = new Date(todayMidnightUTC.getTime() - 7 * DAY_MS);
+  const startUTC = truncateToFreqUTC(now, freq);
 
-  console.log('⛽ Seeding sensor readings…');
-  for (let i = 0; i < sensors.length; i++) {
-    const sensor = sensors[i];
-    const vehicle = vehicles[i];
-    const rcoord = routeCoords[i % routeCoords.length];
-
-    const tank = vehicle.tankSize ?? randInt(MIN_CAP, MAX_CAP);
-    await seedReadingsForSensor(i, sensor.id, sensor.sensorCode, tank, start, rcoord);
-
-    await prisma.sensor.update({
-      where: { id: sensor.id },
-      data: { lastSeen: new Date() },
-    });
-
-    console.log(`  ✓ Seeded ${TOTAL_STEPS} readings for ${sensor.sensorCode} (${vehicle.registrationNo})`);
+  const periods = Math.floor((hours * 60) / freq);
+  if (periods <= 0) {
+    throw new Error(`Computed periods is ${periods}. Check --hours and --freq.`);
   }
 
-  console.log('✅ Seed complete.');
+  const sensors = await pickSensors(sensorsCount);
+
+  console.log(`🛠  Generating ${periods} readings per sensor × ${sensors.length} sensors`);
+  console.log(`     Start (UTC): ${startUTC.toISOString()} | freq: ${freq} min | horizon: ${hours}h`);
+  console.log(`     Probs: theft=${theft_prob}, refuel=${refuel_prob}, drop=${drop_prob}`);
+
+  for (const s of sensors) {
+    await generateForSensor(s, {
+      startUTC,
+      periods,
+      freqMinutes: freq,
+      theftProb: theft_prob,
+      refuelProb: refuel_prob,
+      dropProb: drop_prob,
+      baseLat: base_lat,
+      baseLon: base_lon,
+    });
+    // Update lastSeen for niceness
+    await prisma.sensor.update({
+      where: { id: s.id },
+      data: { lastSeen: new Date() },
+    });
+    console.log(`  ✓ Inserted readings for ${s.sensorCode}`);
+  }
+
+  console.log('✅ Done.');
 }
 
 main()
   .catch((e) => {
-    console.error(e);
+    console.error('❌ Error:', e);
     process.exit(1);
   })
   .finally(async () => {
     await prisma.$disconnect();
   });
+
+
+
+
 
 
 

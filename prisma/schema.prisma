@@ -10,20 +10,24 @@ datasource db {
 }
 
 model Vehicle {
-  id             String   @id @default(uuid())
-  registrationNo String   @unique
-  model          String?
-  tankSize       Int?
-  mileageEst     Float?
-  createdAt      DateTime @default(now())
+  id                String   @id @default(uuid())
+  registrationNo    String   @unique
+  // Optional link to provider's external id (e.g., "ABT-TN38AR1930")
+  externalVehicleId String?
+  model             String?
+  tankSize          Int?
+  mileageEst        Float?
+  createdAt         DateTime @default(now())
 
-  driver    Driver?
-  route     Route?   @relation(fields: [routeId], references: [id])
-  routeId   String?
-  sensor    Sensor?
+  driver  Driver?
+  route   Route?  @relation(fields: [routeId], references: [id])
+  routeId String?
+  sensor  Sensor?
 
   histories History[]
   summaries SummaryMetrics[]
+  events    Event[]
+  alerts    Alert[]
 }
 
 model Driver {
@@ -48,64 +52,86 @@ model Route {
 }
 
 model Sensor {
-  id          String    @id @default(uuid())
-  sensorCode  String    @unique
-  isActive    Boolean   @default(true)
-  installedAt DateTime  @default(now())
+  id          String       @id @default(uuid())
+  sensorCode  String       @unique
+  status      SensorStatus @default(UNKNOWN) // health: OK/OFFLINE/FAULTY
+  isActive    Boolean      @default(true)
+  installedAt DateTime     @default(now())
   lastSeen    DateTime?
 
   vehicle   Vehicle @relation(fields: [vehicleId], references: [id])
   vehicleId String  @unique
 
-  readings  SensorReading[]
-  alerts    Alert[]
-  histories History[]
+  readings SensorReading[]
+  Event    Event[]
+  Alert    Alert[]
+  History  History[]
 }
 
 model SensorReading {
-  id              String   @id @default(uuid())
-  timestamp       DateTime
-  fuelLevel       Float?              // <- make optional
-  distanceKm      Float?              // <- compute later, make optional
-  locationLat     Float
-  locationLong    Float
-  speed           Float
-  ignitionStatus  String?
-  odometer        Float?              // map IO 16 (meters) / 1000 to km
-  deviceVoltage   Float?              // map IO 66 (mV) / 1000 to V
-  sats            Int?                // satellites in use
-  hdop            Float?              // hdop
-  pdop            Float?              // pdop
-  angle           Float?              // course/heading
-  altitude        Float?              // meters
-  priority        Int?                // pr
-  eventId         Int?                // evt
-  raw             Json?               // store full raw reported payload
-  topic           String?             // mqtt topic
-  processed       Boolean  @default(false)
-  createdAt       DateTime @default(now())
+  id             String   @id @default(uuid())
+  timestamp      DateTime
+  fuelLevel      Float?
+  // optional to accept nulls from provider
+  locationLat    Float?
+  locationLong   Float?
+  speed          Float?
+  ignitionStatus String? // "ON"/"OFF" (normalize on ingest)
+  odometerKm     Float? // map provider's odoDistance (km)
+  deviceVoltage  Float? // map deviceVolt (V)
+  address        String?
+
+  isOverSpeed Boolean?
+
+  raw   Json? // minimal forward-compat
+  topic String?
+
+  createdAt DateTime @default(now())
+
   sensor   Sensor @relation(fields: [sensorId], references: [id])
   sensorId String
+
+  @@unique([sensorId, timestamp])
   @@index([timestamp])
-  @@unique([sensorId, timestamp])     // prevent duplicates
+}
+
+model Event {
+  id           String    @id @default(uuid())
+  timestamp    DateTime
+  type         EventType // THEFT, REFUEL, DROP
+  deltaLitres  Float? // + for refuel, - for theft
+  locationLat  Float?
+  locationLong Float?
+  description  String?
+
+  vehicle   Vehicle @relation(fields: [vehicleId], references: [id])
+  vehicleId String
+
+  sensor   Sensor @relation(fields: [sensorId], references: [id])
+  sensorId String
+
+  @@index([vehicleId, timestamp])
 }
 
 model Alert {
   id           String    @id @default(uuid())
   timestamp    DateTime  @default(now())
-  type         AlertType
+  type         AlertType // e.g., SENSOR_HEALTH, LOW_FUEL
   description  String?
-  locationLat  Float
-  locationLong Float
+  locationLat  Float?
+  locationLong Float?
 
-  sensor   Sensor @relation(fields: [sensorId], references: [id])
-  sensorId String
+  vehicle   Vehicle @relation(fields: [vehicleId], references: [id])
+  vehicleId String
+
+  sensor   Sensor? @relation(fields: [sensorId], references: [id])
+  sensorId String?
 }
 
 model History {
-  id             String   @id @default(uuid())
-  timestamp      DateTime @default(now())
-  type           AlertType
+  id             String    @id @default(uuid())
+  timestamp      DateTime  @default(now())
+  type           EventType // reuse event types in history
   description    String
   fuelLevel      Float
   fuelDropLitres Float?
@@ -113,34 +139,40 @@ model History {
   vehicle   Vehicle @relation(fields: [vehicleId], references: [id])
   vehicleId String
 
-  sensor    Sensor  @relation(fields: [sensorId], references: [id])
-  sensorId  String
+  sensor   Sensor @relation(fields: [sensorId], references: [id])
+  sensorId String
 
-  locationLat  Float
-  locationLong Float
+  locationLat  Float?
+  locationLong Float?
 }
 
 model SummaryMetrics {
-  id                   String   @id @default(uuid())
-  vehicleId             String
-  fromDate              DateTime
-  toDate                DateTime
-  sFuelLevel            Float
-  eFuelLevel            Float
-  totalFuelConsumed     Float
-  totalFuelFills        Float
-  totalFuelDrops        Float
-  kmpl                  Float
-  totalDistanceKm       Float
-  totalRunningHours     Float
-  totalIdleHours        Float
-  totalStoppageHours    Float
-  dropAlert             Boolean  @default(false)
-  fillAlert             Boolean  @default(false)
+  id                 String   @id @default(uuid())
+  vehicleId          String
+  fromDate           DateTime
+  toDate             DateTime
+  sFuelLevel         Float
+  eFuelLevel         Float
+  totalFuelConsumed  Float
+  totalFuelFills     Float
+  totalFuelDrops     Float
+  kmpl               Float
+  totalDistanceKm    Float
+  totalRunningHours  Float
+  totalIdleHours     Float
+  totalStoppageHours Float
+  dropAlert          Boolean  @default(false)
+  fillAlert          Boolean  @default(false)
 
-  vehicle   Vehicle @relation(fields: [vehicleId], references: [id])
+  vehicle Vehicle @relation(fields: [vehicleId], references: [id])
 
   @@index([fromDate, toDate])
+}
+
+enum EventType {
+  THEFT
+  REFUEL
+  DROP
 }
 
 enum AlertType {
@@ -152,8 +184,9 @@ enum AlertType {
   UNKNOWN
 }
 
-enum LogLevel {
-  INFO
-  WARNING
-  ERROR
+enum SensorStatus {
+  OK
+  OFFLINE
+  FAULTY
+  UNKNOWN
 }
