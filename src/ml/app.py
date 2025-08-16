@@ -1,88 +1,92 @@
-# src/ml/app.py
-from flask import Flask, request, jsonify, send_file
+# # src/ml/app.py
+
+import os
 import pandas as pd
 import joblib
-import os
+from flask import Flask, request, jsonify
+from catboost import CatBoostClassifier
 
-from src.ml.model_runner import run_prediction  # <-- this now resolves
+# --- 1. Define paths relative to the current working directory ---
+# Use the current working directory instead of __file__ in Colab
+BASE_DIR = os.getcwd()
+MODEL_PATH = os.path.join(BASE_DIR, "src/ml/catboost_model_random_tuned.cbm") # Corrected path
+LABEL_ENCODER_PATH = os.path.join(BASE_DIR, "src/ml/label_encoder.pkl") # Corrected path
 
+# --- 2. Load the CatBoost model ---
+model = CatBoostClassifier()
+if os.path.exists(MODEL_PATH):
+    model.load_model(MODEL_PATH)
+    print(f"Model loaded successfully from {MODEL_PATH}")
+else:
+    raise FileNotFoundError(f"Model file not found at {MODEL_PATH}")
+
+# --- 3. Load the LabelEncoder ---
+if os.path.exists(LABEL_ENCODER_PATH):
+    label_encoder = joblib.load(LABEL_ENCODER_PATH)
+    print(f"LabelEncoder loaded successfully from {LABEL_ENCODER_PATH}")
+else:
+    raise FileNotFoundError(f"LabelEncoder file not found at {LABEL_ENCODER_PATH}")
+
+# --- 4. Define Flask app ---
 app = Flask(__name__)
 
-@app.get("/health")
-def health():
-    return jsonify({"status": "ok"}), 200
-
-@app.post("/predict")
-def predict_json():
+# --- 5. Prediction endpoint ---
+@app.route('/predict', methods=['POST'])
+def predict():
     try:
         if not request.is_json:
             return jsonify({"error": "Expected application/json body"}), 400
-        payload = request.get_json()
-        pred = run_prediction(payload)
-        if isinstance(pred, str) and pred.startswith("Error:"):
-            return jsonify({"error": pred}), 500
-        return jsonify({"prediction": str(pred)}), 200
+        
+        data = request.get_json()
+        
+        # Validate required fields
+        required_fields = ['fuelLevel', 'previous_fuel_level', 'distanceKm', 'locationLat', 
+                          'locationLong', 'speed', 'ignitionStatus', 'isOverSpeed', 
+                          'odometer', 'deviceVoltage', 'topic', 'timestamp']
+        
+        for field in required_fields:
+            if field not in data:
+                return jsonify({"error": f"Missing required field: {field}"}), 400
+        
+        # Convert request to DataFrame
+        df = pd.DataFrame([data])
+        
+        # Add time-based features
+        timestamp = pd.to_datetime(data['timestamp'])
+        df['hour'] = timestamp.hour
+        df['day_of_week'] = timestamp.dayofweek
+        df['is_weekend'] = int(timestamp.dayofweek in [5, 6])
+        
+        # Calculate fuel_diff
+        df['fuel_diff'] = data['fuelLevel'] - data['previous_fuel_level']
+        
+        # Ensure we have all required features
+        required_features = model.feature_names_
+        for feature in required_features:
+            if feature not in df.columns:
+                df[feature] = 0  # Default value for missing features
+        
+        # Select only the features the model expects
+        df = df[required_features]
+        
+        # Predict
+        pred_encoded = model.predict(df)
+        pred_labels = label_encoder.inverse_transform(pred_encoded.flatten())
+        
+        return jsonify({"prediction": str(pred_labels[0])})
     except Exception as e:
+        print(f"Prediction error: {e}")
         return jsonify({"error": str(e)}), 500
 
-@app.post("/predict-file")
-def predict_file():
-    try:
-        file = request.files.get("file")
-        if file is None:
-            return jsonify({"error": "Missing file in multipart/form-data"}), 400
-        df = pd.read_csv(file)
-        model_path = "src/ml/xgb_vehicle_event_augmented.joblib"
-        mdl = joblib.load(model_path)
-        if isinstance(mdl, dict):
-            pipe = mdl.get("pipeline")
-            if pipe is None:
-                return jsonify({"error": "Model bundle missing 'pipeline'"}), 500
-            preds = pipe.predict(df)
-        else:
-            preds = mdl.predict(df)
-        df["predicted_event"] = preds
-        out_path = "predicted_output.csv"
-        df.to_csv(out_path, index=False)
-        return send_file(out_path, as_attachment=True)
-    except Exception as e:
-        return jsonify({"error": str(e)}), 400
+# --- 6. Health endpoint ---
+@app.route('/health', methods=['GET'])
+def health():
+    return jsonify({"status": "ok"})
 
-if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000, debug=False)
+# --- 7. Root endpoint ---
+@app.route('/', methods=['GET'])
+def root():
+    return jsonify({"message": "Vehicle Event Prediction API is running."})
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-# from flask import Flask, request, jsonify
-# from model_runner import run_prediction
-
-# app = Flask(__name__)
-
-# @app.route("/predict", methods=["POST"])
-# def predict():
-#     try:
-#         data = request.get_json()
-#         prediction = run_prediction(data)
-#         return jsonify({"prediction": prediction})
-#     except Exception as e:
-#         return jsonify({"error": str(e)}), 500
+if __name__ == '__main__':
+    app.run(host='0.0.0.0', port=5000, debug=False)

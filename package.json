@@ -20,6 +20,7 @@
     "dotenv": "^17.2.0",
     "express": "^5.1.0",
     "fs": "^0.0.1-security",
+    "localtunnel": "^2.0.2",
     "mqtt": "^5.13.2",
     "node-cron": "^4.2.1",
     "pandas": "^0.0.3",

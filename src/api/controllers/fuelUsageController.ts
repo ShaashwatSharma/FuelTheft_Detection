@@ -1,6 +1,6 @@
 import { Request, Response } from 'express';
 import prisma from '../../lib/prisma';
-import { EventType } from '../../generated/prisma';
+import { AlertType } from '../../generated/prisma';
 
 interface FuelUsageResponse {
   totalFuelConsumed: number;   // L (baseline consumption + theft)
@@ -33,11 +33,6 @@ function normalizeRange(fromRaw: unknown, toRaw: unknown): { from: Date; to: Dat
   return from > to ? { from: to, to: from } : { from, to };
 }
 
-// noise/refuel heuristics
-const NOISE_BAND_LITRES = 0.5;       // ignore tiny jitter
-const REFUEL_JUMP_LITRES = 5;        // jump considered a refuel
-const ABNORMAL_DROP_LITRES = 5;      // large negative spikes likely theft/event-handled
-
 // ---------- controller ----------
 
 export async function getFuelUsage(req: Request, res: Response) {
@@ -52,91 +47,79 @@ export async function getFuelUsage(req: Request, res: Response) {
   try {
     const sensor = await prisma.sensor.findFirst({
       where: { vehicleId: busId },
-      include: {
-        readings: {
-          where: {
-            timestamp: { gte: from, lte: to },
-            fuelLevel: { not: null },
-          },
-          orderBy: { timestamp: 'asc' },
-          select: { timestamp: true, fuelLevel: true, odometerKm: true },
-        },
-        // ⚠️ Sensor relation is PascalCase: History
-        History: {
-          where: {
-            timestamp: { gte: from, lte: to },
-            type: { in: ['THEFT', 'REFUEL'] as EventType[] },
-            fuelDropLitres: { not: null },
-          },
-          select: { type: true, fuelDropLitres: true },
-        },
-      },
+      select: { id: true },
     });
 
     if (!sensor) {
       return res.status(404).json({ message: 'Sensor not found for this bus' });
     }
 
-    const readings = sensor.readings as FuelReading[];
-    const events = sensor.History as Array<{ type: EventType; fuelDropLitres: number | null }>;
+    const readings = await prisma.sensorReading.findMany({
+      where: {
+        sensorId: sensor.id,
+        timestamp: { gte: from, lte: to },
+        odometerKm: { not: null },
+      },
+      orderBy: { timestamp: 'asc' },
+      select: { timestamp: true, fuelLevel: true, odometerKm: true },
+    });
 
-    // --- Aggregate events ---
+    const events = await prisma.history.findMany({
+      where: {
+        sensorId: sensor.id,
+        timestamp: { gte: from, lte: to },
+        type: { in: ['THEFT', 'REFUEL'] as AlertType[] },
+      },
+      select: { type: true, fuelDropLitres: true },
+    });
+
+    // --- Aggregate ML-detected events from database ---
     let totalFuelStolen = 0;
-    let totalFuelRefueledFromEvents = 0;
+    let totalFuelRefueled = 0;
 
-    for (const e of events) {
-      const amt = typeof e.fuelDropLitres === 'number' ? Math.abs(e.fuelDropLitres) : 0;
-      if (e.type === 'THEFT') totalFuelStolen += amt;
-      else if (e.type === 'REFUEL') totalFuelRefueledFromEvents += amt;
+    for (const event of events) {
+      const amount = Math.abs(event.fuelDropLitres || 0);
+      if (event.type === 'THEFT') {
+        totalFuelStolen += amount;
+      } else if (event.type === 'REFUEL') {
+        totalFuelRefueled += amount;
+      }
     }
 
-    // --- Distance from odometer deltas (handles resets) ---
+    // --- Calculate distance from odometer readings ---
     let distanceTravelled = 0;
     if (readings.length > 1) {
       for (let i = 1; i < readings.length; i++) {
-        const prev = readings[i - 1].odometerKm ?? null;
-        const curr = readings[i].odometerKm ?? null;
-        if (prev !== null && curr !== null) {
-          const d = curr - prev;
-          if (d > 0) distanceTravelled += d; // sum positive increments only
+        const prev = readings[i - 1].odometerKm;
+        const curr = readings[i].odometerKm;
+        if (prev !== null && curr !== null && curr > prev) {
+          distanceTravelled += (curr - prev);
         }
       }
     }
 
-    // --- Consumption & detected refuels from fuel deltas ---
-    let normalConsumptionFromReadings = 0; // L
-    let detectedRefuelsFromReadings = 0;   // L
-
+    // --- Calculate fuel consumption from readings (simple approach) ---
+    let fuelConsumedFromReadings = 0;
     if (readings.length > 1) {
-      for (let i = 1; i < readings.length; i++) {
-        const a = readings[i - 1].fuelLevel;
-        const b = readings[i].fuelLevel;
-        if (a == null || b == null) continue;
-
-        const delta = b - a;
-
-        // ignore tiny jitter
-        if (Math.abs(delta) < NOISE_BAND_LITRES) continue;
-
-        if (delta > REFUEL_JUMP_LITRES) {
-          // a refuel jump detected from readings
-          detectedRefuelsFromReadings += delta;
-        } else if (delta < 0) {
-          // negative = consumption (ignore huge drops as they’re likely theft/event-handled)
-          const drop = -delta;
-          if (drop <= ABNORMAL_DROP_LITRES) normalConsumptionFromReadings += drop;
-          // else: big drops should already be covered by THEFT events
+      const firstReading = readings.find(r => r.fuelLevel !== null);
+      const lastReading = [...readings].reverse().find(r => r.fuelLevel !== null);
+      
+      if (firstReading && lastReading && firstReading.fuelLevel !== null && lastReading.fuelLevel !== null) {
+        // Only count as consumption if fuel level decreased
+        const fuelDifference = firstReading.fuelLevel - lastReading.fuelLevel;
+        if (fuelDifference > 0) {
+          fuelConsumedFromReadings = fuelDifference;
         }
       }
     }
 
-    const totalFuelRefueled = totalFuelRefueledFromEvents + detectedRefuelsFromReadings;
-
-    // Total consumed = baseline consumption + stolen (stolen is also fuel that left tank)
-    const totalFuelConsumed = normalConsumptionFromReadings + totalFuelStolen;
+    // Total consumed = consumption from readings + stolen fuel (both represent fuel leaving the tank)
+    const totalFuelConsumed = fuelConsumedFromReadings + totalFuelStolen;
 
     const fuelEfficiency =
-      totalFuelConsumed > 0 ? distanceTravelled / totalFuelConsumed : null;
+      totalFuelConsumed > 0 && distanceTravelled > 0 
+        ? distanceTravelled / totalFuelConsumed 
+        : null;
 
     const response: FuelUsageResponse = {
       totalFuelConsumed: +totalFuelConsumed.toFixed(2),

@@ -45,7 +45,7 @@ services:
       - PYTHONPATH=/app
     healthcheck:
       test: ["CMD-SHELL", "python -c \"import urllib.request,sys; urllib.request.urlopen('http://localhost:5000/health', timeout=2); sys.exit(0)\""]
-      interval: 10s
+      interval: 60s
       timeout: 5s
       retries: 6
       start_period: 10s

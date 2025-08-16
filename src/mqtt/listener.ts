@@ -14,16 +14,28 @@ dotenv.config();
 const TOPIC_FILTER = process.env.AWS_MQTT_TOPIC_FILTER || '+/data';
 
 // AWS IoT Core MQTT connection options (TLS)
-const mqttOptions: mqtt.IClientOptions = {
-  clientId: process.env.AWS_MQTT_CLIENT_ID || 'fuel-theft-backend',
-  key: fs.readFileSync(path.join(__dirname, '..', '..', 'cert', 'private.pem.key')),
-  cert: fs.readFileSync(path.join(__dirname, '..', '..', 'cert', 'certificate.pem.crt')),
-  ca: fs.readFileSync(path.join(__dirname, '..', '..', 'cert', 'AmazonRootCA1.pem')),
-  protocol: 'mqtts',
-  rejectUnauthorized: true,
-  keepalive: 60,
-  reconnectPeriod: 3000,
-};
+let mqttOptions: mqtt.IClientOptions;
+
+try {
+  mqttOptions = {
+    clientId: process.env.AWS_MQTT_CLIENT_ID || 'fuel-theft-backend',
+    key: fs.readFileSync(path.join(__dirname, '..', '..', 'cert', 'private.pem.key')),
+    cert: fs.readFileSync(path.join(__dirname, '..', '..', 'cert', 'certificate.pem.crt')),
+    ca: fs.readFileSync(path.join(__dirname, '..', '..', 'cert', 'AmazonRootCA1.pem')),
+    protocol: 'mqtts',
+    rejectUnauthorized: true,
+    keepalive: 60,
+    reconnectPeriod: 3000,
+  };
+} catch (err) {
+  console.warn('⚠️ Certificate files not found, falling back to insecure connection:', err);
+  mqttOptions = {
+    clientId: process.env.AWS_MQTT_CLIENT_ID || 'fuel-theft-backend',
+    protocol: 'mqtt',
+    keepalive: 60,
+    reconnectPeriod: 3000,
+  };
+}
 
 const brokerUrl = process.env.AWS_MQTT_ENDPOINT
   ? `mqtts://${process.env.AWS_MQTT_ENDPOINT}:8883`

@@ -81,6 +81,9 @@ model SensorReading {
   deviceVoltage  Float? // map deviceVolt (V)
   address        String?
 
+  // Whether this reading has been processed by the detection pipeline
+  processed      Boolean  @default(false)
+
   isOverSpeed Boolean?
 
   raw   Json? // minimal forward-compat
@@ -92,6 +95,7 @@ model SensorReading {
   sensorId String
 
   @@unique([sensorId, timestamp])
+  @@index([sensorId, processed, timestamp])
   @@index([timestamp])
 }
 
@@ -131,7 +135,7 @@ model Alert {
 model History {
   id             String    @id @default(uuid())
   timestamp      DateTime  @default(now())
-  type           EventType // reuse event types in history
+  type           AlertType // store model classification for each reading
   description    String
   fuelLevel      Float
   fuelDropLitres Float?

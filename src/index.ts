@@ -1,5 +1,6 @@
 import prisma from './lib/prisma';
 import { runDetection } from './processor/detector';
+import { runOfflineMonitor } from './processor/offlineMonitor';
 import cron from 'node-cron';
 import './processor/detector';
 import './api';
@@ -11,7 +12,8 @@ async function main() {
 }
 
 // setTimeout(runDetection, 10000); // run 10 sec after start
-cron.schedule('*/1 * * * *', runDetection);// Every 1 minutes
+// cron.schedule('*/1 * * * *', runDetection);// Every 15 minutes
+cron.schedule('*/15 * * * *', runOfflineMonitor);// Offline health check every 15 minutes
 
 main().catch(e => {
   console.error(e);

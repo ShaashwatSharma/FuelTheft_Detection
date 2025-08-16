@@ -1,11 +1,7 @@
 // src/processor/detector.ts
 import prisma from '../lib/prisma';
 import axios from 'axios';
-import {
-  Prisma,
-  type AlertType,   // enum: THEFT | REFUEL | LOW_FUEL | SENSOR_HEALTH | NORMAL | UNKNOWN
-  type EventType,   // enum: THEFT | REFUEL | DROP
-} from '../generated/prisma';
+import { Prisma, type AlertType, type EventType } from '../generated/prisma';
 
 const MODEL_URL = process.env.MODEL_URL || 'http://model-service:5000/predict';
 const MODEL_TIMEOUT_MS = Number(process.env.MODEL_TIMEOUT_MS ?? 10_000);
@@ -50,7 +46,7 @@ async function writeHistoryByReadingId(
   readingId: string,
   data: {
     timestamp: Date;
-    type: EventType;
+    type: AlertType;
     description: string;
     fuelLevel: number;
     fuelDropLitres: number | null;
@@ -83,7 +79,7 @@ async function writeHistoryByReadingId(
 // -- main ---------------------------------------------------------------------
 
 export async function runDetection() {
-  console.log('🔍 Running event detection (topic-aware, idempotent)…');
+  console.log('🔍 Running event detection (per-sensor, sequential, processed-flag)…');
 
   const sensors = await prisma.sensor.findMany({
     include: { vehicle: true },
@@ -92,45 +88,51 @@ export async function runDetection() {
 
   for (const sensor of sensors) {
     try {
-      // Pull readings oldest-first for this sensor.
-      const readings = await prisma.sensorReading.findMany({
-        where: { sensorId: sensor.id },
+      // Determine last processed reading for context
+      let lastProcessed = await prisma.sensorReading.findFirst({
+        where: { sensorId: sensor.id, processed: true },
+        orderBy: { timestamp: 'desc' },
+      });
+
+      // Fetch unprocessed readings oldest-first for this sensor
+      const pending = await prisma.sensorReading.findMany({
+        where: { sensorId: sensor.id, processed: false },
         orderBy: { timestamp: 'asc' },
       });
-      if (readings.length === 0) continue;
-
-      // Skip readings we've already created a History for (we only create History on events).
-      const existingHist = await prisma.history.findMany({
-        where: { id: { in: readings.map(r => r.id) } },
-        select: { id: true },
-      });
-      const alreadyHandled = new Set(existingHist.map(h => h.id));
-      const pending = readings.filter(r => !alreadyHandled.has(r.id));
 
       if (pending.length === 0) continue;
-      console.log(`▶️  ${sensor.sensorCode}: ${pending.length} pending readings`);
+      console.log(`▶️  ${sensor.sensorCode}: ${pending.length} unprocessed readings`);
 
       for (const curr of pending) {
         const topic = curr.topic ?? null;
         const topicLabel = topic ?? '(no-topic)';
 
-        // Previous reading strictly before this timestamp (best-effort).
-        const prev = await prisma.sensorReading.findFirst({
-          where: {
-            sensorId: sensor.id,
-            timestamp: { lt: curr.timestamp },
-            fuelLevel: { not: null },
-            // topic: topic, // if you want "same topic" only, uncomment
-          },
-          orderBy: { timestamp: 'desc' },
-        });
+        // CRITICAL FIX: Better previous reading logic for sensor isolation
+        let prev = lastProcessed;
+        if (!prev) {
+          // If no processed reading, find the most recent unprocessed reading before current
+          prev = await prisma.sensorReading.findFirst({
+            where: {
+              sensorId: sensor.id, // CRITICAL: Ensure same sensor
+              timestamp: { lt: curr.timestamp },
+              fuelLevel: { not: null },
+            },
+            orderBy: { timestamp: 'desc' },
+          });
+        }
 
-        // Decide fuel values — we need a number if we’re going to create an event/history.
+        // CRITICAL FIX: Better fuel level logic
         const prevFuel = prev?.fuelLevel ?? null;
-        const fuelNow = curr.fuelLevel ?? prevFuel;
+        const fuelNow = curr.fuelLevel ?? null;
 
-        // If both are null, we can’t reason about fuel; move on.
-        if (fuelNow == null) continue;
+        // Skip if we can't determine current fuel level
+        if (fuelNow == null) {
+          console.log(`⚠️  ${sensor.sensorCode}: Skipping reading with null fuel level`);
+          continue;
+        }
+
+        // CRITICAL FIX: Better previous fuel level handling
+        const effectivePrevFuel = prevFuel ?? fuelNow; // Use current as previous if no previous
 
         // Compute distance feature (prefer odometerKm diff, else haversine)
         const distanceKm =
@@ -138,10 +140,13 @@ export async function runDetection() {
             ? Math.max(0, curr.odometerKm - prev.odometerKm)
             : haversineKm(prev?.locationLat ?? null, prev?.locationLong ?? null, curr.locationLat ?? null, curr.locationLong ?? null);
 
-        // Build model input
+        // CRITICAL FIX: Calculate fuel_diff properly
+        const fuelDiff = effectivePrevFuel - fuelNow; // Positive = fuel consumed/dropped
+
+        // Build model input with proper fuel_diff
         const input = {
           fuelLevel: fuelNow,
-          previous_fuel_level: prevFuel ?? fuelNow,
+          previous_fuel_level: effectivePrevFuel,
           distanceKm,
           locationLat: curr.locationLat ?? 0,
           locationLong: curr.locationLong ?? 0,
@@ -154,100 +159,100 @@ export async function runDetection() {
           timestamp: curr.timestamp.toISOString(),
         };
 
+        // Debug logging for fuel calculations
+        console.log(`🔍 ${sensor.sensorCode}: fuel_now=${fuelNow}, prev_fuel=${effectivePrevFuel}, fuel_diff=${fuelDiff.toFixed(2)}, distance=${distanceKm.toFixed(2)}km`);
+
         // Get model prediction (AlertType)
         let prediction: AlertType = 'UNKNOWN';
         try {
           const { data } = await axios.post(MODEL_URL, input, { timeout: MODEL_TIMEOUT_MS });
           prediction = normalizePrediction(data?.prediction);
+          console.log(`🤖 ${sensor.sensorCode}: Model prediction = ${prediction}`);
         } catch (err: any) {
           console.warn(`❌ ${sensor.sensorCode} [${topicLabel}] model error @ ${curr.timestamp.toISOString()}: ${err?.message}`);
           prediction = 'UNKNOWN';
         }
 
-        // Delta (positive = refuel, negative = drop/consumption)
+        // CRITICAL FIX: Better delta calculation
         const deltaLitres = prevFuel != null ? (fuelNow - prevFuel) : 0;
         const deltaStr = (deltaLitres >= 0 ? '+' : '') + deltaLitres.toFixed(2) + 'L';
 
-        // Map AlertType -> EventType (only for real fuel events)
+        // Map AlertType -> EventType (only for REFUEL/THEFT)https://ca.slack-edge.com/T018F3SJ35E-U08T4P6K7HV-34ad189ae82f-512
         let eventType: EventType | null = null;
         if (prediction === 'THEFT') eventType = 'THEFT';
         else if (prediction === 'REFUEL') eventType = 'REFUEL';
-        // (No NORMAL/LOW_FUEL/UNKNOWN history entries; LOW_FUEL still creates an alert below)
 
-        // Write History only for eventful readings
-        if (eventType) {
-          const desc = `[${topicLabel}] ${eventType} | Δ=${deltaStr} | speed=${(curr.speed ?? 0).toFixed(1)} km/h`;
-          await prisma.$transaction(async (tx) => {
-            await writeHistoryByReadingId(tx, curr.id, {
-              timestamp: curr.timestamp,
-              type: eventType,
-              description: desc,
-              fuelLevel: fuelNow,
-              fuelDropLitres: eventType === 'THEFT' ? Math.abs(deltaLitres) : null,
-              vehicleId: sensor.vehicleId,
-              sensorId: sensor.id,
-              locationLat: curr.locationLat ?? null,
-              locationLong: curr.locationLong ?? null,
-            });
-
-            // Create a user-facing alert for THEFT/REFUEL
-            const alertType: AlertType = eventType === 'REFUEL' ? 'REFUEL' : 'THEFT';
-            const exists = await tx.alert.findFirst({
-              where: {
-                sensorId: sensor.id,
-                vehicleId: sensor.vehicleId,
-                timestamp: curr.timestamp,
-                type: alertType,
-              },
-              select: { id: true },
-            });
-            if (!exists) {
-              await tx.alert.create({
-                data: {
-                  type: alertType,
-                  timestamp: curr.timestamp,
-                  description: `[${topicLabel}] ${alertType} | ${deltaStr}`,
-                  locationLat: curr.locationLat ?? null,
-                  locationLong: curr.locationLong ?? null,
-                  sensorId: sensor.id,
-                  vehicleId: sensor.vehicleId, // REQUIRED by schema
-                },
-              });
-            }
+        // Transaction per reading: history (always), alert (always), events (only THEFT/REFUEL), mark processed
+        await prisma.$transaction(async (tx) => {
+          // Always write History with model classification
+          const desc = `[${topicLabel}] ${prediction} | Δ=${deltaStr} | speed=${(curr.speed ?? 0).toFixed(1)} km/h | fuel_diff=${fuelDiff.toFixed(2)}L`;
+          await writeHistoryByReadingId(tx, curr.id, {
+            timestamp: curr.timestamp,
+            type: prediction as AlertType,
+            description: desc,
+            fuelLevel: fuelNow,
+            fuelDropLitres: prediction === 'THEFT' ? Math.abs(deltaLitres) : null,
+            vehicleId: sensor.vehicleId,
+            sensorId: sensor.id,
+            locationLat: curr.locationLat ?? null,
+            locationLong: curr.locationLong ?? null,
           });
-        }
 
-        // LOW_FUEL alert (no history)
-        if (prediction === 'LOW_FUEL') {
-          const exists = await prisma.alert.findFirst({
-            where: {
-              sensorId: sensor.id,
-              vehicleId: sensor.vehicleId,
-              timestamp: curr.timestamp,
-              type: 'LOW_FUEL',
-            },
+          // One alert per reading with model type
+          const alertExists = await tx.alert.findFirst({
+            where: { sensorId: sensor.id, vehicleId: sensor.vehicleId, timestamp: curr.timestamp, type: prediction },
             select: { id: true },
           });
-          if (!exists) {
-            await prisma.alert.create({
+          if (!alertExists) {
+            await tx.alert.create({
               data: {
-                type: 'LOW_FUEL',
+                type: prediction,
                 timestamp: curr.timestamp,
-                description: `[${topicLabel}] LOW_FUEL at ${fuelNow.toFixed(1)}L`,
+                description: desc,
                 locationLat: curr.locationLat ?? null,
                 locationLong: curr.locationLong ?? null,
                 sensorId: sensor.id,
-                vehicleId: sensor.vehicleId, // REQUIRED
+                vehicleId: sensor.vehicleId,
               },
             });
           }
-        }
 
-        // Note: we no longer mark SensorReading.processed (field was removed).
-        // Idempotency is via History.id = reading.id for eventful reads + deduped alerts.
+          // Event only for THEFT/REFUEL
+          if (eventType) {
+            const evtExists = await tx.event.findFirst({
+              where: { sensorId: sensor.id, vehicleId: sensor.vehicleId, timestamp: curr.timestamp, type: eventType },
+              select: { id: true },
+            });
+            if (!evtExists) {
+              await tx.event.create({
+                data: {
+                  type: eventType,
+                  timestamp: curr.timestamp,
+                  deltaLitres: eventType === 'REFUEL' ? Math.abs(deltaLitres) : -Math.abs(deltaLitres),
+                  description: desc,
+                  locationLat: curr.locationLat ?? null,
+                  locationLong: curr.locationLong ?? null,
+                  sensorId: sensor.id,
+                  vehicleId: sensor.vehicleId,
+                },
+              });
+            }
+          }
+
+          // Mark this reading as processed
+          await tx.sensorReading.update({
+            where: { id: curr.id },
+            data: { processed: true },
+          });
+        });
+
+        // Advance context for next iteration
+        lastProcessed = curr;
+
+        // Idempotency is via History.id = reading.id + processed flag
       }
 
-      console.log(`✅ ${sensor.sensorCode}: done`);
+      console.log(`✅ ${sensor.sensorCode}: processed ${pending.length}`);
     } catch (err) {
       console.error(`🚨 Error processing sensor ${sensor.sensorCode}:`, err);
     }

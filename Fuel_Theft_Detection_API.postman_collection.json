@@ -1,0 +1,411 @@
+{
+	"info": {
+		"_postman_id": "fuel-theft-detection-api",
+		"name": "Fuel Theft Detection API",
+		"description": "Complete API collection for the Fuel Theft Detection Backend System. Includes vehicle management, sensor monitoring, fuel usage tracking, history, and summary metrics.",
+		"schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json",
+		"_exporter_id": "fuel-theft-backend"
+	},
+	"item": [
+		{
+			"name": "Health Check",
+			"request": {
+				"method": "GET",
+				"header": [],
+				"url": {
+					"raw": "{{base_url}}/health",
+					"host": ["{{base_url}}"],
+					"path": ["health"]
+				},
+				"description": "Check if the API server is running and healthy"
+			},
+			"response": []
+		},
+		{
+			"name": "Vehicles",
+			"item": [
+				{
+					"name": "Get All Vehicles",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/vehicles",
+							"host": ["{{base_url}}"],
+							"path": ["vehicles"]
+						},
+						"description": "Retrieve all vehicles with basic information including driver, route, and sensor status"
+					},
+					"response": []
+				},
+				{
+					"name": "Get Vehicle Details",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/vehicles/{{vehicle_id}}/details?include=alerts,readings,histories,events&fromDate={{from_date}}&toDate={{to_date}}",
+							"host": ["{{base_url}}"],
+							"path": ["vehicles", "{{vehicle_id}}", "details"],
+							"query": [
+								{
+									"key": "include",
+									"value": "alerts,readings,histories,events",
+									"description": "Comma-separated list of data to include"
+								},
+								{
+									"key": "fromDate",
+									"value": "{{from_date}}",
+									"description": "Start date (ISO format)"
+								},
+								{
+									"key": "toDate",
+									"value": "{{to_date}}",
+									"description": "End date (ISO format)"
+								}
+							]
+						},
+						"description": "Get detailed vehicle information with optional data includes. Supports: alerts, readings, histories, events"
+					},
+					"response": []
+				}
+			],
+			"description": "Vehicle management endpoints"
+		},
+		{
+			"name": "Sensor Management",
+			"item": [
+				{
+					"name": "Get All Sensor Status",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/sensor",
+							"host": ["{{base_url}}"],
+							"path": ["sensor"]
+						},
+						"description": "Get status of all sensors with health information"
+					},
+					"response": []
+				},
+				{
+					"name": "Get Sensor Status by Bus ID",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/sensor?busId={{vehicle_id}}",
+							"host": ["{{base_url}}"],
+							"path": ["sensor"],
+							"query": [
+								{
+									"key": "busId",
+									"value": "{{vehicle_id}}",
+									"description": "Vehicle ID to filter sensor status"
+								}
+							]
+						},
+						"description": "Get sensor status for a specific vehicle"
+					},
+					"response": []
+				},
+				{
+					"name": "Get Sensor Status by Status Type",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/sensor?status=OFFLINE&fromDate={{from_date}}&toDate={{to_date}}",
+							"host": ["{{base_url}}"],
+							"path": ["sensor"],
+							"query": [
+								{
+									"key": "status",
+									"value": "OFFLINE",
+									"description": "Sensor status filter (OK, OFFLINE, FAULTY, UNKNOWN)"
+								},
+								{
+									"key": "fromDate",
+									"value": "{{from_date}}",
+									"description": "Start date for health events"
+								},
+								{
+									"key": "toDate",
+									"value": "{{to_date}}",
+									"description": "End date for health events"
+								}
+							]
+						},
+						"description": "Get sensors with specific status and health events within date range"
+					},
+					"response": []
+				}
+			],
+			"description": "Sensor monitoring and health endpoints"
+		},
+		{
+			"name": "Fuel Usage",
+			"item": [
+				{
+					"name": "Get Fuel Usage Statistics",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/fuelusage?busId={{vehicle_id}}&fromDate={{from_date}}&toDate={{to_date}}",
+							"host": ["{{base_url}}"],
+							"path": ["fuelusage"],
+							"query": [
+								{
+									"key": "busId",
+									"value": "{{vehicle_id}}",
+									"description": "Vehicle ID to get fuel usage for"
+								},
+								{
+									"key": "fromDate",
+									"value": "{{from_date}}",
+									"description": "Start date (ISO format)"
+								},
+								{
+									"key": "toDate",
+									"value": "{{to_date}}",
+									"description": "End date (ISO format)"
+								}
+							]
+						},
+						"description": "Get comprehensive fuel usage statistics including consumption, theft, refuel, distance, and efficiency"
+					},
+					"response": []
+				}
+			],
+			"description": "Fuel usage tracking and analysis endpoints"
+		},
+		{
+			"name": "History & Events",
+			"item": [
+				{
+					"name": "Get All History",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/history?limit=100&offset=0&sort=desc",
+							"host": ["{{base_url}}"],
+							"path": ["history"],
+							"query": [
+								{
+									"key": "limit",
+									"value": "100",
+									"description": "Number of records to return"
+								},
+								{
+									"key": "offset",
+									"value": "0",
+									"description": "Number of records to skip"
+								},
+								{
+									"key": "sort",
+									"value": "desc",
+									"description": "Sort order (asc/desc)"
+								}
+							]
+						},
+						"description": "Get all history records with pagination and sorting"
+					},
+					"response": []
+				},
+				{
+					"name": "Get History by Type",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/history?type=THEFT,REFUEL&fromDate={{from_date}}&toDate={{to_date}}",
+							"host": ["{{base_url}}"],
+							"path": ["history"],
+							"query": [
+								{
+									"key": "type",
+									"value": "THEFT,REFUEL",
+									"description": "Comma-separated list of event types"
+								},
+								{
+									"key": "fromDate",
+									"value": "{{from_date}}",
+									"description": "Start date filter"
+								},
+								{
+									"key": "toDate",
+									"value": "{{to_date}}",
+									"description": "End date filter"
+								}
+							]
+						},
+						"description": "Get history records filtered by specific event types"
+					},
+					"response": []
+				},
+				{
+					"name": "Get History by Sensor",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/history?sensorId={{sensor_id}}&limit=50",
+							"host": ["{{base_url}}"],
+							"path": ["history"],
+							"query": [
+								{
+									"key": "sensorId",
+									"value": "{{sensor_id}}",
+									"description": "Sensor ID to filter history"
+								},
+								{
+									"key": "limit",
+									"value": "50",
+									"description": "Number of records to return"
+								}
+							]
+						},
+						"description": "Get history records for a specific sensor"
+					},
+					"response": []
+				}
+			],
+			"description": "Historical data and event tracking endpoints"
+		},
+		{
+			"name": "Summary Metrics",
+			"item": [
+				{
+					"name": "Get Summary Metrics",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/summarymatrix?busId={{vehicle_id}}&fromDate={{from_date}}&toDate={{to_date}}&generate=true",
+							"host": ["{{base_url}}"],
+							"path": ["summarymatrix"],
+							"query": [
+								{
+									"key": "busId",
+									"value": "{{vehicle_id}}",
+									"description": "Vehicle ID to get summary metrics for"
+								},
+								{
+									"key": "fromDate",
+									"value": "{{from_date}}",
+									"description": "Start date for summary period"
+								},
+								{
+									"key": "toDate",
+									"value": "{{to_date}}",
+									"description": "End date for summary period"
+								},
+								{
+									"key": "generate",
+									"value": "true",
+									"description": "Auto-generate summary metrics if none exist (true/false, defaults to true)"
+								}
+							]
+						},
+						"description": "Get aggregated summary metrics for a vehicle including fuel consumption, distance, efficiency, and alerts. Auto-generates metrics if none exist."
+					},
+					"response": []
+				},
+				{
+					"name": "Get Summary Metrics (No Auto-Generation)",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/summarymatrix?busId={{vehicle_id}}&fromDate={{from_date}}&toDate={{to_date}}&generate=false",
+							"host": ["{{base_url}}"],
+							"path": ["summarymatrix"],
+							"query": [
+								{
+									"key": "busId",
+									"value": "{{vehicle_id}}",
+									"description": "Vehicle ID to get summary metrics for"
+								},
+								{
+									"key": "fromDate",
+									"value": "{{from_date}}",
+									"description": "Start date for summary period"
+								},
+								{
+									"key": "toDate",
+									"value": "{{to_date}}",
+									"description": "End date for summary period"
+								},
+								{
+									"key": "generate",
+									"value": "false",
+									"description": "Disable auto-generation of summary metrics"
+								}
+							]
+						},
+						"description": "Get existing summary metrics only. Returns 404 if no metrics exist (no auto-generation)."
+					},
+					"response": []
+				}
+			],
+			"description": "Aggregated metrics and summary data endpoints"
+		}
+	],
+	"event": [
+		{
+			"listen": "prerequest",
+			"script": {
+				"type": "text/javascript",
+				"exec": [
+					"// Set default dates if not already set",
+					"if (!pm.environment.get('from_date')) {",
+					"    const now = new Date();",
+					"    const weekAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);",
+					"    pm.environment.set('from_date', weekAgo.toISOString());",
+					"    pm.environment.set('to_date', now.toISOString());",
+					"}",
+					"",
+					"// Set default vehicle ID if not set",
+					"if (!pm.environment.get('vehicle_id')) {",
+					"    pm.environment.set('vehicle_id', 'default-vehicle-id');",
+					"}",
+					"",
+					"// Set default sensor ID if not set",
+					"if (!pm.environment.get('sensor_id')) {",
+					"    pm.environment.set('sensor_id', 'default-sensor-id');",
+					"}"
+				]
+			}
+		}
+	],
+	"variable": [
+		{
+			"key": "base_url",
+			"value": "http://localhost:3000",
+			"type": "string"
+		},
+		{
+			"key": "vehicle_id",
+			"value": "",
+			"type": "string"
+		},
+		{
+			"key": "sensor_id",
+			"value": "",
+			"type": "string"
+		},
+		{
+			"key": "from_date",
+			"value": "",
+			"type": "string"
+		},
+		{
+			"key": "to_date",
+			"value": "",
+			"type": "string"
+		}
+	]
+}
