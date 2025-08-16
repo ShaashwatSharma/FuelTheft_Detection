@@ -2,22 +2,9 @@
 import { Request, Response } from 'express';
 import prisma from '../../lib/prisma';
 import { AlertType, SensorStatus, Prisma } from '../../generated/prisma';
+import { normalizeRangeOptional } from '../../utils/dateUtils';
 
 // -------- utils --------------------------------------------------------------
-
-function parseDate(input: unknown, fallback: Date): Date {
-  if (!input) return fallback;
-  const d = new Date(String(input));
-  return isNaN(d.getTime()) ? fallback : d;
-}
-
-function normalizeRange(fromRaw: unknown, toRaw: unknown): { from: Date; to: Date } {
-  const now = new Date();
-  const defaultFrom = new Date(now.getTime() - 7 * 24 * 3600 * 1000); // last 7 days
-  const from = parseDate(fromRaw, defaultFrom);
-  const to = parseDate(toRaw, now);
-  return from > to ? { from: to, to: from } : { from, to };
-}
 
 function asSensorStatus(v: unknown): SensorStatus | null {
   const s = String(v ?? '').trim().toUpperCase();
@@ -32,7 +19,8 @@ export async function getSensorStatus(req: Request, res: Response) {
   const { busId, status, fromDate, toDate } = req.query;
 
   try {
-    const { from, to } = normalizeRange(fromDate, toDate);
+    const { from, to } = normalizeRangeOptional(fromDate, toDate);
+    const hasDateRange = from !== undefined && to !== undefined;
 
     // Build Sensor filters
     const sensorWhere: Prisma.SensorWhereInput = {};
@@ -57,13 +45,19 @@ export async function getSensorStatus(req: Request, res: Response) {
     // Build Alert (health) filters
     const alertWhere: Prisma.AlertWhereInput = {
       type: 'SENSOR_HEALTH' as AlertType,
-      timestamp: { gte: from, lte: to },
     };
+    
+    // Only apply date filters if date range is provided
+    if (hasDateRange && from && to) {
+      alertWhere.timestamp = { gte: from, lte: to };
+    }
 
     // If status was NOT a SensorStatus enum, treat it as a free-text filter on description
     if (!sensorStatus && status) {
       alertWhere.description = { contains: String(status), mode: 'insensitive' };
     }
+
+    console.log(`[SensorHealth] Fetching sensor status${hasDateRange ? ` from ${from} to ${to}` : ' (all available data)'}`);
 
     const sensors = await prisma.sensor.findMany({
       where: sensorWhere,
@@ -72,11 +66,14 @@ export async function getSensorStatus(req: Request, res: Response) {
         Alert: {
           where: alertWhere,
           orderBy: { timestamp: 'desc' },
+          // No take/skip limits - fetch all data
         },
         vehicle: { select: { id: true, registrationNo: true } },
       },
       orderBy: { installedAt: 'desc' },
     });
+
+    console.log(`[SensorHealth] Retrieved ${sensors.length} sensors with health data`);
 
     const result = sensors.map((s) => ({
       sensorId: s.id,
@@ -95,154 +92,13 @@ export async function getSensorStatus(req: Request, res: Response) {
       })),
     }));
 
-    res.json({ range: { from, to }, data: result });
+    res.json({ 
+      range: hasDateRange && from && to ? { from, to } : 'all available data', 
+      data: result,
+      count: result.length
+    });
   } catch (err) {
-    console.error('getSensorStatus error:', err);
+    console.error('[SensorHealth] getSensorStatus error:', err);
     res.status(500).json({ message: 'Failed to fetch sensor status' });
   }
 }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-// // src/api/controllers/sensorController.ts
-// import { Request, Response } from 'express';
-// import prisma from '../../lib/prisma';
-
-// // Fetch sensor health status with optional filters
-// export async function getSensorStatus(req: Request, res: Response) {
-//   const { busId, status, fromDate, toDate } = req.query;
-
-//   try {
-//     const sensorWhere: any = {};
-//     const historyWhere: any = { type: 'SENSOR_HEALTH' };
-
-//     if (busId) {
-//       const sensor = await prisma.sensor.findFirst({ where: { vehicleId: busId.toString() } });
-//       if (!sensor) return res.status(404).json({ message: 'Sensor not found for this bus' });
-//       sensorWhere.id = sensor.id;
-//       historyWhere.sensorId = sensor.id;
-//     }
-
-//     if (status) {
-//       const statusUpper = status.toString().toUpperCase();
-//       historyWhere.description = { contains: statusUpper };
-//     }
-
-//     if (fromDate || toDate) {
-//       historyWhere.timestamp = {
-//         ...(fromDate && { gte: new Date(fromDate.toString()) }),
-//         ...(toDate && { lte: new Date(toDate.toString()) }),
-//       };
-//     }
-
-//     const sensors = await prisma.sensor.findMany({
-//       where: sensorWhere,
-//       include: {
-//         histories: {
-//           where: historyWhere,
-//           orderBy: { timestamp: 'desc' },
-//         },
-//       },
-//     });
-
-//     const result = sensors.map((s) => ({
-//       sensorId: s.id,
-//       sensorCode: s.sensorCode,
-//       isActive: s.isActive,
-//       lastSeen: s.lastSeen,
-//       healthEvents: s.histories.map(h => ({
-//         id: h.id,
-//         timestamp: h.timestamp,
-//         description: h.description,
-//       })),
-//     }));
-
-//     res.json(result);
-//   } catch (err) {
-//     console.error(err);
-//     res.status(500).json({ message: 'Failed to fetch sensor status' });
-//   }
-// }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-// // src/api/controllers/sensorController.ts
-// import { Request, Response } from 'express';
-// import prisma from '../../lib/prisma';
-
-// // Fetch sensor status with optional filters
-// export async function getSensorStatus(req: Request, res: Response) {
-//   const { busId, status, fromDate, toDate } = req.query;
-
-//   try {
-//     const sensorWhere: any = {};
-//     const eventWhere: any = {};
-
-//     if (busId) {
-//       const sensor = await prisma.sensor.findFirst({ where: { vehicleId: busId.toString() } });
-//       if (!sensor) return res.status(404).json({ message: 'Sensor not found for this bus' });
-//       sensorWhere.id = sensor.id;
-//       eventWhere.sensorId = sensor.id;
-//     }
-
-//     if (status) {
-//       eventWhere.status = status.toString().toUpperCase();
-//     }
-
-//     if (fromDate && toDate) {
-//       eventWhere.timestamp = {
-//         gte: new Date(fromDate.toString()),
-//         lte: new Date(toDate.toString()),
-//       };
-//     }
-
-//     const sensors = await prisma.sensor.findMany({
-//       where: sensorWhere,
-//       include: {
-//         onOffEvents: {
-//           where: eventWhere,
-//           orderBy: { timestamp: 'desc' },
-//         },
-//       },
-//     });
-
-//     const result = sensors.map((s) => ({
-//       sensorId: s.id,
-//       sensorCode: s.sensorCode,
-//       isActive: s.isActive,
-//       lastSeen: s.lastSeen,
-//       onOffEvents: s.onOffEvents,
-//     }));
-
-//     res.json(result);
-//   } catch (err) {
-//     console.error(err);
-//     res.status(500).json({ message: 'Failed to fetch sensor status' });
-//   }
-// }
