@@ -249,10 +249,10 @@ async function generateSummaryMetrics(vehicleId: string, fromDate: Date | undefi
 
     // Count ML-detected events from History table
     histories.forEach(history => {
-      if (history.type === 'REFUEL' && history.fuelDropLitres) {
+      if (history.type === 'REFUEL') {
         totalFuelFills += Math.abs(history.fuelDropLitres);
         fillAlert = true;
-      } else if (history.type === 'THEFT' && history.fuelDropLitres) {
+      } else if (history.type === 'THEFT') {
         totalFuelDrops += Math.abs(history.fuelDropLitres);
         dropAlert = true;
       }

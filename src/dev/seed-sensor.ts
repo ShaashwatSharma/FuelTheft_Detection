@@ -11,13 +11,14 @@ import { hideBin } from 'yargs/helpers';
 
 // ---------- CLI ----------
 const argv = yargs(hideBin(process.argv))
-  .option('sensors', { type: 'number', default: 10, describe: 'Total sensors to ensure & simulate' })
+  .option('sensors', { type: 'number', default: 5, describe: 'Total sensors to ensure & simulate' })
   .option('hours', { type: 'number', default: 168, describe: 'Total simulation horizon in hours (7 days)' })
   .option('freq', { type: 'number', default: 30, describe: 'Reading frequency (minutes), e.g., 30' })
   .option('seed', { type: 'number', default: 2025, describe: 'PRNG seed' })
-  .option('theft_prob', { type: 'number', default: 0.004, describe: 'Probability of a theft event per tick' })
-  .option('refuel_prob', { type: 'number', default: 0.003, describe: 'Probability of a refuel event per tick' })
-  .option('drop_prob', { type: 'number', default: 0.008, describe: 'Probability of a small drop event per tick' })
+  .option('theft_prob', { type: 'number', default: 0.20, describe: 'Probability of a theft event per tick (20%)' })
+  .option('refuel_prob', { type: 'number', default: 0.10, describe: 'Probability of a refuel event per tick (10%)' })
+  .option('drop_prob', { type: 'number', default: 0.05, describe: 'Probability of a small drop event per tick (5%)' })
+  .option('offline_prob', { type: 'number', default: 0.15, describe: 'Probability of sensor going offline (15%)' })
   .option('base_lat', { type: 'number', default: 12.9716, describe: 'Base latitude' })
   .option('base_lon', { type: 'number', default: 77.5946, describe: 'Base longitude' })
   .help()
@@ -216,38 +217,32 @@ async function generateForSensor(sensor: SensorLite, opts: {
     // Expected burn from driving
     const expectedBurn = mileageKmPerL > 1e-3 ? distanceKm / mileageKmPerL : 0;
 
-    // Random events with time-of-day bias and cooldown
+    // BALANCED EVENT GENERATION: 70% Normal, 20% Theft, 10% Refuel
     let eventType: SimEvent = 'NORMAL';
     let theftDrop = 0.0;
     let refuelAdd = 0.0;
 
     const canEvent = (i - lastEventTick) >= minEventGapTicks;
     if (canEvent) {
-      // Bias: theft more likely late night; refuel more likely morning/evening
-      const theftBias = (!isDay ? 1.8 : 1.0);
-      const refuelBias = ((hour >= 6 && hour <= 9) || (hour >= 18 && hour <= 21)) ? 1.6 : 1.0;
-
-      const rT = rand();
-      const rR = rand();
-
-      if (rT < (opts.theftProb * theftBias) && fuel > 30) {
-        // Occasional larger sudden drop (theft)
-        theftDrop = randFloat(15.0, Math.min(60.0, fuel), 2);
+      const randomValue = rand();
+      
+      // 70% Normal (0.0 - 0.7)
+      if (randomValue < 0.7) {
+        eventType = 'NORMAL';
+        // Normal fuel consumption only
+      }
+      // 20% Theft (0.7 - 0.9)
+      else if (randomValue < 0.9 && fuel > 30) {
         eventType = 'THEFT';
+        theftDrop = randFloat(15.0, Math.min(35.0, fuel * 0.4), 2);
         lastEventTick = i;
-      } else if (rR < (opts.refuelProb * refuelBias) && fuel < tankSize * 0.85) {
-        // Refuel sizeable amount but not exceeding tank
-        const room = Math.max(5, tankSize - fuel);
-        refuelAdd = randFloat(20.0, Math.min(90.0, room), 2);
+      }
+      // 10% Refuel (0.9 - 1.0)
+      else if (randomValue < 1.0 && fuel < tankSize * 0.9) {
         eventType = 'REFUEL';
+        const room = Math.max(10, tankSize - fuel);
+        refuelAdd = randFloat(25.0, Math.min(80.0, room), 2);
         lastEventTick = i;
-      } else {
-        // Occasionally small drops (sensor noise / minor usage quirk)
-        const rD = rand();
-        if (rD < opts.dropProb && fuel > 5.0) {
-          theftDrop = randFloat(0.5, Math.min(3.0, fuel), 2);
-          eventType = 'DROP';
-        }
       }
     }
 
@@ -300,17 +295,24 @@ async function generateForSensor(sensor: SensorLite, opts: {
     const fuel_diff = parseFloat((newFuel - prevFuel).toFixed(2));
     const topic = `${sensor.sensorCode}/data`;
 
-    // Build SensorReading row (schema-aligned)
+    // SENSOR OFFLINE SIMULATION: 15% chance to skip reading (simulate offline sensor)
+    const isOffline = rand() < 0.15;
+    if (isOffline) {
+      console.log(`📡 ${sensor.sensorCode}: Sensor offline at ${t.toISOString()}`);
+      continue; // Skip this reading
+    }
+
+    // Build SensorReading row (schema-aligned) - ensure no null values in critical fields
     BATCH.push({
       timestamp: t,
-      fuelLevel: newFuel,
-      locationLat,
-      locationLong,
-      speed,
-      ignitionStatus,
-      odometerKm,
-      deviceVoltage,
-      isOverSpeed,
+      fuelLevel: newFuel || 0, // Ensure fuelLevel is never null
+      locationLat: locationLat || 0,
+      locationLong: locationLong || 0,
+      speed: speed || 0,
+      ignitionStatus: ignitionStatus || 'OFF',
+      odometerKm: odometerKm || 0,
+      deviceVoltage: deviceVoltage || 12.0,
+      isOverSpeed: isOverSpeed || false,
       raw: {
         source: 'ts-generator',
         sim: {
@@ -369,7 +371,8 @@ async function main() {
 
   console.log(`🛠  Generating ${periods} readings per sensor × ${sensors.length} sensors`);
   console.log(`     Start (UTC): ${startUTC.toISOString()} | freq: ${freq} min | horizon: ${hours}h`);
-  console.log(`     Probs: theft=${theft_prob}, refuel=${refuel_prob}, drop=${drop_prob}`);
+  console.log(`     Distribution: 70% Normal, 20% Theft, 10% Refuel`);
+  console.log(`     Offline simulation: 15% chance per reading`);
   console.log(`     Guards: min fuel=${FUEL_MIN_BEFORE_REFUEL} L, forced refuel ≥ ${REFUEL_MIN_LITERS} L`);
 
   for (const s of sensors) {

@@ -138,16 +138,16 @@ model History {
   type           AlertType // store model classification for each reading
   description    String
   fuelLevel      Float
-  fuelDropLitres Float?
+  fuelDropLitres Float
+  odoDistance    Float
+  locationLat    Float?
+  locationLong   Float?
 
   vehicle   Vehicle @relation(fields: [vehicleId], references: [id])
   vehicleId String
 
   sensor   Sensor @relation(fields: [sensorId], references: [id])
   sensorId String
-
-  locationLat  Float?
-  locationLong Float?
 }
 
 model SummaryMetrics {

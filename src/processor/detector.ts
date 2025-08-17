@@ -49,7 +49,8 @@ async function writeHistoryByReadingId(
     type: AlertType;
     description: string;
     fuelLevel: number;
-    fuelDropLitres: number | null;
+    fuelDropLitres: number;
+    odoDistance: number;
     vehicleId: string;
     sensorId: string;
     locationLat?: number | null;
@@ -63,6 +64,7 @@ async function writeHistoryByReadingId(
       description: data.description,
       fuelLevel: data.fuelLevel,
       fuelDropLitres: data.fuelDropLitres,
+      odoDistance: data.odoDistance,
       timestamp: data.timestamp,
       vehicleId: data.vehicleId,
       sensorId: data.sensorId,
@@ -143,30 +145,41 @@ export async function runDetection() {
         // CRITICAL FIX: Calculate fuel_diff properly
         const fuelDiff = effectivePrevFuel - fuelNow; // Positive = fuel consumed/dropped
 
-        // Build model input with proper fuel_diff
+        // Build model input with proper fuel_diff - ALIGNED WITH ML MODEL FEATURES
         const input = {
-          fuelLevel: fuelNow,
-          previous_fuel_level: effectivePrevFuel,
-          distanceKm,
+          fuelLevel: fuelNow || 0,
+          previous_fuel_level: effectivePrevFuel || 0,
+          distanceKm: distanceKm || 0,
           locationLat: curr.locationLat ?? 0,
           locationLong: curr.locationLong ?? 0,
           speed: curr.speed ?? 0,
-          ignitionStatus: curr.ignitionStatus ?? 'UNKNOWN',
+          ignitionStatus: curr.ignitionStatus ?? 'OFF',
           isOverSpeed: curr.isOverSpeed ?? false,
-          odometer: curr.odometerKm ?? 0,
-          deviceVoltage: curr.deviceVoltage ?? 0,
+          odometer: curr.odometerKm ?? 0, // Field name expected by ML model
+          deviceVoltage: curr.deviceVoltage ?? 12.0,
           topic: topic ?? '',
           timestamp: curr.timestamp.toISOString(),
         };
 
-        // Debug logging for fuel calculations
+        // Debug logging for fuel calculations and model input
         console.log(`🔍 ${sensor.sensorCode}: fuel_now=${fuelNow}, prev_fuel=${effectivePrevFuel}, fuel_diff=${fuelDiff.toFixed(2)}, distance=${distanceKm.toFixed(2)}km`);
+        console.log(`📤 ${sensor.sensorCode}: Sending to ML model:`, JSON.stringify(input, null, 2));
 
-        // Get model prediction (AlertType)
+        // Get model prediction (AlertType) - SEND DATA IN CORRECT FORMAT
         let prediction: AlertType = 'UNKNOWN';
         try {
+          // Send data directly (not in records format) as expected by container app.py
           const { data } = await axios.post(MODEL_URL, input, { timeout: MODEL_TIMEOUT_MS });
-          prediction = normalizePrediction(data?.prediction);
+          
+          // Extract prediction from the response format
+          if (data?.prediction) {
+            prediction = normalizePrediction(data.prediction);
+            console.log(`📥 ${sensor.sensorCode}: ML model response:`, JSON.stringify(data, null, 2));
+          } else {
+            prediction = 'UNKNOWN';
+            console.log(`⚠️ ${sensor.sensorCode}: No predictions in ML response:`, JSON.stringify(data, null, 2));
+          }
+          
           console.log(`🤖 ${sensor.sensorCode}: Model prediction = ${prediction}`);
         } catch (err: any) {
           console.warn(`❌ ${sensor.sensorCode} [${topicLabel}] model error @ ${curr.timestamp.toISOString()}: ${err?.message}`);
@@ -191,7 +204,8 @@ export async function runDetection() {
             type: prediction as AlertType,
             description: desc,
             fuelLevel: fuelNow,
-            fuelDropLitres: prediction === 'THEFT' ? Math.abs(deltaLitres) : null,
+            fuelDropLitres: prediction === 'THEFT' ? Math.abs(deltaLitres) : 0,
+            odoDistance: curr.odometerKm ?? 0,
             vehicleId: sensor.vehicleId,
             sensorId: sensor.id,
             locationLat: curr.locationLat ?? null,

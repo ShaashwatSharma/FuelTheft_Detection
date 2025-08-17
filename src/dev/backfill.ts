@@ -33,7 +33,7 @@ async function backfillEventsFromHistory() {
           data: {
             type: h.type as any,
             timestamp: h.timestamp,
-            deltaLitres: h.type === 'REFUEL' ? Math.abs(h.fuelDropLitres ?? 0) : (h.type === 'THEFT' ? -Math.abs(h.fuelDropLitres ?? 0) : null),
+            deltaLitres: h.type === 'REFUEL' ? Math.abs(h.fuelDropLitres) : (h.type === 'THEFT' ? -Math.abs(h.fuelDropLitres) : null),
             description: h.description,
             locationLat: h.locationLat ?? null,
             locationLong: h.locationLong ?? null,

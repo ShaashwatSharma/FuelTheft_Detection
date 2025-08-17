@@ -22,7 +22,7 @@ try {
     key: fs.readFileSync(path.join(__dirname, '..', '..', 'cert', 'private.pem.key')),
     cert: fs.readFileSync(path.join(__dirname, '..', '..', 'cert', 'certificate.pem.crt')),
     ca: fs.readFileSync(path.join(__dirname, '..', '..', 'cert', 'AmazonRootCA1.pem')),
-    protocol: 'mqtts',
+  protocol: 'mqtts',
     rejectUnauthorized: true,
     keepalive: 60,
     reconnectPeriod: 3000,
@@ -256,9 +256,9 @@ client.on('message', async (topic, buf) => {
 
     // Insert reading (duplicate-safe on [sensorId, timestamp])
     try {
-      await prisma.sensorReading.create({
-        data: {
-          sensorId: sensor.id,
+    await prisma.sensorReading.create({
+      data: {
+        sensorId: sensor.id,
           timestamp: reading.timestamp,
           fuelLevel: reading.fuelLevel ?? undefined,
           locationLat: reading.locationLat ?? undefined,
@@ -271,8 +271,8 @@ client.on('message', async (topic, buf) => {
           isOverSpeed: reading.isOverSpeed ?? undefined,
           raw: payload,
           topic: topic.toString(),
-        },
-      });
+      },
+    });
       console.log('✅ Stored reading for sensor %s @ %s', sensorCode, reading.timestamp.toISOString());
     } catch (e: any) {
       // P2002 = Unique constraint failed on the fields: (`sensorId`,`timestamp`)
