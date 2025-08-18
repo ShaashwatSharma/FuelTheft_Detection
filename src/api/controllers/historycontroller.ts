@@ -17,6 +17,11 @@ export async function getHistory(req: Request, res: Response) {
   } = req.query;
 
   try {
+    // Validate sort parameter
+    if (sort && !['asc', 'desc'].includes(sort.toString().toLowerCase())) {
+      return res.status(400).json({ message: 'Invalid sort parameter (must be "asc" or "desc")' });
+    }
+
     const where: Prisma.HistoryWhereInput = {};
 
     // Filter by sensorId
@@ -30,6 +35,15 @@ export async function getHistory(req: Request, res: Response) {
         .toString()
         .split(',')
         .map((t) => t.trim().toUpperCase()) as AlertType[];
+
+      // Validate type values against AlertType enum
+      const validTypes: AlertType[] = ['THEFT', 'REFUEL', 'NORMAL', 'LOW_FUEL', 'SENSOR_HEALTH', 'UNKNOWN'];
+      const invalidTypes = types.filter(t => !validTypes.includes(t));
+      if (invalidTypes.length > 0) {
+        return res.status(400).json({ 
+          message: `Invalid type values: ${invalidTypes.join(', ')}. Valid types: ${validTypes.join(', ')}` 
+        });
+      }
 
       if (types.length === 1) {
         where.type = types[0];
@@ -64,9 +78,14 @@ export async function getHistory(req: Request, res: Response) {
     }
     skip = Math.min(offsetNum, MAX_OFFSET);
 
+    const startTime = Date.now();
     console.log(`[History] Fetching history records${take ? ` with limit ${take}` : ' (all records)'} and offset ${skip}`);
 
-    // Fetch histories with vehicle, driver, route info
+    // Get total count first for proper pagination
+    const totalRecords = await prisma.history.count({ where });
+    console.log(`[History] Total records matching filters: ${totalRecords}`);
+
+    // Fetch paginated histories with vehicle, driver, route info
     const histories = await prisma.history.findMany({
       where,
       orderBy: {
@@ -88,7 +107,8 @@ export async function getHistory(req: Request, res: Response) {
       },
     });
 
-    console.log(`[History] Retrieved ${histories.length} history records`);
+    const queryTime = Date.now() - startTime;
+    console.log(`[History] Retrieved ${histories.length} history records in ${queryTime}ms`);
 
     // Format response
     const formatted = histories.map((h) => ({
@@ -112,14 +132,15 @@ export async function getHistory(req: Request, res: Response) {
         : null,
     }));
 
+    // Return response with correct pagination info
     res.json({
       data: formatted,
       count: formatted.length,
-      hasMore: take ? histories.length === take : false,
+      hasMore: take ? (skip + take) < totalRecords : false,
       pagination: {
-        limit: take || 'all',
+        limit: take,
         offset: skip,
-        total: formatted.length
+        total: totalRecords
       }
     });
   } catch (err) {

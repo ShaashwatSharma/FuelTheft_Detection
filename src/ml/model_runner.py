@@ -1,152 +1,69 @@
-# --- START OF FILE model_runner.py ---
-
 #!/usr/bin/env python3
-"""Simple model runner utility.
-- Can be invoked by cron/docker to score a CSV and produce an output.
-- Calls the main predict.py script and shows its output.
 """
-import argparse
-import subprocess
+Convenience wrapper to run predict.py with sensible defaults and clear logs.
+
+- Prefers data/ paths inside the project.
+- Falls back to root if needed.
+- Prints predict.py stdout/stderr and propagates its exit code.
+"""
+
 import sys
+import subprocess
 from pathlib import Path
 
-# Import default paths from the central config file
-from config import DEFAULT_INPUT_CSV, DEFAULT_OUTPUT_CSV
+PROJECT_DIR = Path(__file__).resolve().parent
+DATA_DIR = PROJECT_DIR / "data"
+PREDICT = PROJECT_DIR / "predict.py"
+
+DEFAULT_INPUTS = [
+    DATA_DIR / "vehicle_events_noisy_no_flag.csv",
+    DATA_DIR / "synthetic_fuel_11000_rules.csv",
+    PROJECT_DIR / "vehicle_events_noisy_no_flag.csv",
+    PROJECT_DIR / "synthetic_fuel_11000_rules.csv",
+]
+DEFAULT_OUTPUT = DATA_DIR / "vehicle_events_with_preds.csv"
 
 def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument(
-        "--input",
-        default=str(DEFAULT_INPUT_CSV),
-        help=f"Input CSV to score (default: {DEFAULT_INPUT_CSV.name})"
-    )
-    ap.add_argument(
-        "--output",
-        default=str(DEFAULT_OUTPUT_CSV),
-        help=f"Where to write predictions CSV (default: {DEFAULT_OUTPUT_CSV.name})"
-    )
-    args = ap.parse_args()
+    input_path = next((p for p in DEFAULT_INPUTS if p.exists()), None)
+    if input_path is None:
+        print("❌ No default input CSV found. Looked for:")
+        for p in DEFAULT_INPUTS:
+            print("  -", p)
+        print("\nFix one of these:")
+        print("  • Put your CSV into data/vehicle_events_noisy_no_flag.csv, or")
+        print("  • Edit model_runner.py DEFAULT_INPUTS to your file.")
+        sys.exit(2)
 
-    # Get the path to the predict.py script in the same directory
-    predict_script_path = Path(__file__).resolve().parent / "predict.py"
-    
-    if not predict_script_path.exists():
-        print(f"Error: predict.py not found at {predict_script_path}", file=sys.stderr)
-        sys.exit(1)
+    if not PREDICT.exists():
+        print(f"❌ predict.py not found at {PREDICT}")
+        sys.exit(2)
 
-    # Call predict.py with the specified arguments
+    DEFAULT_OUTPUT.parent.mkdir(parents=True, exist_ok=True)
+
     cmd = [
-        sys.executable,        # Use the same python interpreter
-        str(predict_script_path),
-        "--input", args.input,
-        "--output", args.output
+        sys.executable,
+        str(PREDICT),
+        "--input", str(input_path),
+        "--output", str(DEFAULT_OUTPUT),
     ]
-    print("Running command:", " ".join(cmd))
 
-    # Run the subprocess and capture its output
-    res = subprocess.run(cmd, capture_output=True, text=True, check=False)
-    
-    # --- Print the captured output from the predict.py script ---
-    # The logging messages from predict.py will be in stderr
-    if res.stderr:
-        print("\n--- Logs from predict.py ---")
-        print(res.stderr.strip())
+    print("Running command:", " ".join(cmd), flush=True)
+    proc = subprocess.run(cmd, capture_output=True, text=True)
 
-    # If there's any standard output, print it too
-    if res.stdout:
-        print("\n--- Standard Output from predict.py ---")
-        print(res.stdout.strip())
-    
-    # If the subprocess failed, exit with its error code
-    if res.returncode != 0:
-        print(f"\npredict.py exited with a non-zero status code: {res.returncode}", file=sys.stderr)
-        sys.exit(res.returncode)
+    print("\n--- Logs from predict.py ---")
+    if proc.stdout:
+        print(proc.stdout.rstrip())
+    if proc.stderr:
+        print(proc.stderr.rstrip())
 
-    print("\n--- model_runner.py finished ---")
+    if proc.returncode != 0:
+        print(f"\npredict.py exited with a non-zero status code: {proc.returncode}")
+        sys.exit(proc.returncode)
+
+    print("\n✅ Done.")
 
 if __name__ == "__main__":
     main()
-
-
-# # --- START OF FILE model_runner.py ---
-
-# #!/usr/bin/env python3
-# """Simple model runner utility.
-# - Can be invoked by cron/docker to score a CSV and produce an output.
-# - Calls the main predict.py script and shows its output.
-# """
-# import argparse
-# import subprocess
-# import sys
-# from pathlib import Path
-
-# # Import default paths from the central config file
-# from config import DEFAULT_INPUT_CSV, DEFAULT_OUTPUT_CSV
-
-# def main():
-#     ap = argparse.ArgumentParser()
-#     ap.add_argument(
-#         "--input",
-#         default=str(DEFAULT_INPUT_CSV),
-#         help=f"Input CSV to score (default: {DEFAULT_INPUT_CSV.name})"
-#     )
-#     ap.add_argument(
-#         "--output",
-#         default=str(DEFAULT_OUTPUT_CSV),
-#         help=f"Where to write predictions CSV (default: {DEFAULT_OUTPUT_CSV.name})"
-#     )
-#     args = ap.parse_args()
-
-#     # Get the path to the predict.py script in the same directory
-#     predict_script_path = Path(__file__).resolve().parent / "predict.py"
-    
-#     if not predict_script_path.exists():
-#         print(f"Error: predict.py not found at {predict_script_path}", file=sys.stderr)
-#         sys.exit(1)
-
-#     # Call predict.py with the specified arguments
-#     cmd = [
-#         sys.executable,        # Use the same python interpreter
-#         str(predict_script_path),
-#         "--input", args.input,
-#         "--output", args.output
-#     ]
-#     print("Running command:", " ".join(cmd))
-
-#     # Run the subprocess and capture its output
-#     res = subprocess.run(cmd, capture_output=True, text=True, check=False)
-    
-#     # --- Print the captured output from the predict.py script ---
-#     # The logging messages from predict.py will be in stderr
-#     if res.stderr:
-#         print("\n--- Logs from predict.py ---")
-#         print(res.stderr.strip())
-
-#     # If there's any standard output, print it too
-#     if res.stdout:
-#         print("\n--- Standard Output from predict.py ---")
-#         print(res.stdout.strip())
-    
-#     # If the subprocess failed, exit with its error code
-#     if res.returncode != 0:
-#         print(f"\npredict.py exited with a non-zero status code: {res.returncode}", file=sys.stderr)
-#         sys.exit(res.returncode)
-
-#     print("\n--- model_runner.py finished ---")
-
-# if __name__ == "__main__":
-#     main()
-
-
-
-
-
-
-
-
-
-
-
 
 
 
@@ -164,81 +81,65 @@ if __name__ == "__main__":
 
 
 
-
-# import pandas as pd
-# import numpy as np
-# import joblib
-# from catboost import CatBoostClassifier
+# #!/usr/bin/env python3
+# import sys
+# import subprocess
 # from pathlib import Path
-# import os
 
-# # --- Load Model and Encoder Artefacts ---
-# # This is done once when the script is imported, making predictions faster.
+# # Project folders
+# PROJECT_DIR = Path(__file__).resolve().parent
+# DATA_DIR = PROJECT_DIR / "data"
+# PREDICT = PROJECT_DIR / "predict.py"
 
-# # Define the paths to the saved model and encoder
-# # Use the current working directory instead of __file__ in Colab
-# BASE_DIR = Path(os.getcwd())
-# MODEL_PATH = BASE_DIR / "model" / "/Users/shashwat/Desktop/SIDEMEN/model/catboost_model_random_tuned.cbm"
-# ENCODER_PATH = BASE_DIR / "model" / "/Users/shashwat/Desktop/SIDEMEN/label_encoder.pkl"
+# # Defaults (adjust if you like)
+# DEFAULT_INPUT  = DATA_DIR / "synthetic_fuel_11000_rules.csv"
+# DEFAULT_OUTPUT = DATA_DIR / "vehicle_events_noisy_no_flag.csv"
 
-# # Load the trained model
-# print(f"Loading model from: {MODEL_PATH}")
-# model = CatBoostClassifier()
-# model.load_model(MODEL_PATH)
+# def main():
+#     # Prefer data/… files; fall back to project root if needed
+#     input_candidates = [
+#         DEFAULT_INPUT,
+#         PROJECT_DIR / "synthetic_fuel_11000_rules.csv",
+#     ]
+#     output_path = DEFAULT_OUTPUT
 
-# # Load the label encoder
-# print(f"Loading label encoder from: {ENCODER_PATH}")
-# label_encoder = joblib.load(ENCODER_PATH)
+#     # Pick the first existing input
+#     input_path = next((p for p in input_candidates if p.exists()), None)
 
+#     if input_path is None:
+#         print("❌ Could not find an input CSV. Looked for:")
+#         for p in input_candidates:
+#             print(f"   - {p}")
+#         print("\nFix one of these:")
+#         print("  • Move your CSV to data/synthetic_fuel_11000_rules.csv")
+#         print("  • Or edit model_runner.py to point at the correct file")
+#         sys.exit(2)
 
-# def predict_dataframe(df: pd.DataFrame) -> tuple[np.ndarray, pd.DataFrame]:
-#     """
-#     Generates predictions for an entire DataFrame.
+#     if not PREDICT.exists():
+#         print(f"❌ predict.py not found at {PREDICT}")
+#         sys.exit(2)
 
-#     Args:
-#         df: A pandas DataFrame with the same raw structure as the training data.
+#     cmd = [
+#         sys.executable,
+#         str(PREDICT),
+#         "--input", str(input_path),
+#         "--output", str(output_path),
+#     ]
 
-#     Returns:
-#         A tuple containing:
-#         - A numpy array of predicted string labels (e.g., ['THEFT', 'NORMAL']).
-#         - A pandas DataFrame of prediction probabilities for each class.
-#     """
-#     # Create a copy to avoid modifying the original DataFrame
-#     processed_df = df.copy()
+#     print("Running command:", " ".join(cmd), flush=True)
+#     proc = subprocess.run(cmd, capture_output=True, text=True)
 
-#     # --- 1. Apply the EXACT same preprocessing and feature engineering ---
+#     print("\n--- Logs from predict.py ---")
+#     if proc.stdout:
+#         print(proc.stdout.rstrip())
+#     if proc.stderr:
+#         print(proc.stderr.rstrip())
 
-#     # Handle missing values
-#     processed_df.fillna({
-#         'previous_fuel_level': 0,
-#         'fuel_diff': 0,
-#     }, inplace=True)
+#     if proc.returncode != 0:
+#         print(f"\npredict.py exited with a non-zero status code: {proc.returncode}")
+#         sys.exit(proc.returncode)
 
-#     # Feature engineering from timestamp
-#     processed_df['timestamp'] = pd.to_datetime(processed_df['timestamp'])
-#     processed_df['hour'] = processed_df['timestamp'].dt.hour
-#     processed_df['day_of_week'] = processed_df['timestamp'].dt.dayofweek
-#     processed_df['is_weekend'] = processed_df['day_of_week'].isin([5, 6]).astype(int)
+#     print("\n✅ Done.")
 
-#     # Ensure the feature columns are in the exact same order as during training
-#     # The model object itself stores the feature names it was trained on.
-#     model_features = model.feature_names_
-#     processed_df = processed_df[model_features]
-
-#     # --- 2. Make Predictions ---
-
-#     # Get encoded predictions (as numbers)
-#     predictions_encoded = model.predict(processed_df)
-
-#     # Get prediction probabilities
-#     probabilities = model.predict_proba(processed_df)
-
-#     # --- 3. Format the Output ---
-
-#     # Convert encoded predictions back to original string labels (e.g., 0 -> 'LOW_FUEL')
-#     final_labels = label_encoder.inverse_transform(predictions_encoded.flatten())
-
-#     # Create a user-friendly DataFrame for probabilities
-#     proba_df = pd.DataFrame(probabilities, columns=label_encoder.classes_)
-
-#     return final_labels, proba_df
+# if __name__ == "__main__":
+#     main()

@@ -171,10 +171,17 @@ export async function runDetection() {
           // Send data directly (not in records format) as expected by container app.py
           const { data } = await axios.post(MODEL_URL, input, { timeout: MODEL_TIMEOUT_MS });
           
-          // Extract prediction from the response format
+          // Extract prediction from supported response formats
+          // Format A (simple): { prediction: "TYPE" }
+          // Format B (rich):   { count, params, predictions: [ { pred_label, pred_label_raw, ... } ] }
           if (data?.prediction) {
             prediction = normalizePrediction(data.prediction);
-            console.log(`📥 ${sensor.sensorCode}: ML model response:`, JSON.stringify(data, null, 2));
+            console.log(`📥 ${sensor.sensorCode}: ML model response (simple):`, JSON.stringify(data, null, 2));
+          } else if (Array.isArray(data?.predictions) && data.predictions.length > 0) {
+            const first = data.predictions[0] ?? {};
+            const candidate = first.pred_label ?? first.pred_label_raw ?? first.predicted_eventType;
+            prediction = normalizePrediction(candidate);
+            console.log(`📥 ${sensor.sensorCode}: ML model response (rich):`, JSON.stringify(first, null, 2));
           } else {
             prediction = 'UNKNOWN';
             console.log(`⚠️ ${sensor.sensorCode}: No predictions in ML response:`, JSON.stringify(data, null, 2));

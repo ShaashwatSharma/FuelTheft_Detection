@@ -1,8 +1,14 @@
-flask==3.0.3
+# Core runtime (inference)
 pandas==2.2.2
 numpy==1.26.4
+scikit-learn==1.4.2
 catboost==1.2.5
-scikit-learn==1.5.1
 joblib==1.4.2
-matplotlib==3.9.2
+
+# API (optional, for app.py)
+Flask==3.0.3
+gunicorn==22.0.0
+
+# Dev / training helpers (optional; safe to keep pinned)
+matplotlib==3.8.4
 seaborn==0.13.2
