@@ -1,10 +1,15 @@
 #!/usr/bin/env ts-node
 /**
- * Seed base data (100 routes, vehicles, drivers, sensors) and generate readings.
- * - Never inserts a fuelLevel of 0 (auto-refuels before that).
- * - If computed fuel drops below 1 L, force a REFUEL of at least 100 L (capped by tank).
- * 
- * Generates 100 sensors, each with 10-15 readings per day, for 30 days.
+ * Seed base data (routes, vehicles, drivers, sensors) and generate readings.
+ *
+ * Key guarantees for downstream (e.g., Python) consumers:
+ * - fuelLevel is NEVER 0 and NEVER exactly the tank cap (keeps headroom).
+ * - If computed fuel < FUEL_MIN_BEFORE_REFUEL, we FORCE a refuel of at least REFUEL_MIN_LITERS (capped by tank - headroom).
+ * - All numeric fields are finite; no NaN/Infinity written.
+ * - Monotonic odometer and realistic speed/geo drift.
+ * - Uses CLI probabilities (no hardcoded 70/20/10 split).
+ *
+ * Generates N sensors, each with 10–15 (configurable) readings per day, for M days.
  */
 
 import prisma from '../lib/prisma';
@@ -18,10 +23,10 @@ const argv = yargs(hideBin(process.argv))
   .option('min_per_day', { type: 'number', default: 10, describe: 'Min readings per day per sensor' })
   .option('max_per_day', { type: 'number', default: 15, describe: 'Max readings per day per sensor' })
   .option('seed', { type: 'number', default: 2025, describe: 'PRNG seed' })
-  .option('theft_prob', { type: 'number', default: 0.20, describe: 'Probability of a theft event per tick (20%)' })
-  .option('refuel_prob', { type: 'number', default: 0.10, describe: 'Probability of a refuel event per tick (10%)' })
-  .option('drop_prob', { type: 'number', default: 0.05, describe: 'Probability of a small drop event per tick (5%)' })
-  .option('offline_prob', { type: 'number', default: 0.0001, describe: 'Probability of sensor going offline (15%)' })
+  .option('theft_prob', { type: 'number', default: 0.20, describe: 'Probability of a theft event per tick (0–1)' })
+  .option('refuel_prob', { type: 'number', default: 0.10, describe: 'Probability of a refuel event per tick (0–1)' })
+  .option('drop_prob', { type: 'number', default: 0.05, describe: 'Probability of a small drop/noise event per tick (0–1)' })
+  .option('offline_prob', { type: 'number', default: 0.001, describe: 'Probability of sensor going offline (0–1)' })
   .option('base_lat', { type: 'number', default: 12.9716, describe: 'Base latitude' })
   .option('base_lon', { type: 'number', default: 77.5946, describe: 'Base longitude' })
   .help()
@@ -49,7 +54,6 @@ function randInt(min: number, max: number) {
   return Math.floor(min + (max - min + 1) * rand());
 }
 function randNormal(mean = 0, sd = 1) {
-  // Box-Muller
   let u = 0, v = 0;
   while (u === 0) u = rand();
   while (v === 0) v = rand();
@@ -59,32 +63,21 @@ function randNormal(mean = 0, sd = 1) {
 function clamp(n: number, lo: number, hi: number) {
   return Math.max(lo, Math.min(hi, n));
 }
-
-// ---------- Safety thresholds (new) ----------
-// If computed fuel would go below this, we force a refuel.
-const FUEL_MIN_BEFORE_REFUEL = 1.0;     // liters
-// How much we must add at minimum when we force a refuel.
-const REFUEL_MIN_LITERS = 100.0;
-// Upper bound for a single forced refuel (still capped by tank size).
-const REFUEL_MAX_LITERS = 180.0;
-// After any refuel, keep a tiny headroom below exact cap to avoid "exactly full".
-const TANK_HEADROOM = 0.5;
-
-// ---------- Helpers ----------
-function truncateToFreqUTC(date: Date, minutes: number) {
-  const d = new Date(Date.UTC(
-    date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate(),
-    date.getUTCHours(), date.getUTCMinutes(), 0, 0
-  ));
-  const m = d.getUTCMinutes();
-  const remainder = m % minutes;
-  if (remainder !== 0) d.setUTCMinutes(m - remainder, 0, 0);
-  return d;
+function finiteOr<T extends number>(n: T, fallback: T): T {
+  return Number.isFinite(n) ? n : fallback;
 }
 
-type SensorLite = { id: string; sensorCode: string; vehicleId: string };
+// ---------- Safety thresholds ----------
+const FUEL_MIN_BEFORE_REFUEL = 1.0;     // liters
+const REFUEL_MIN_LITERS = 100.0;
+const REFUEL_MAX_LITERS = 180.0;
+const TANK_HEADROOM = 0.5;
 
-// Ensure N routes, vehicles, drivers, sensors (idempotent)
+// ---------- Types ----------
+type SensorLite = { id: string; sensorCode: string; vehicleId: string };
+type SimEvent = 'NORMAL' | 'THEFT' | 'REFUEL';
+
+// ---------- Ensure base data ----------
 async function ensureBaseData(count: number): Promise<SensorLite[]> {
   const sensors: SensorLite[] = [];
   const pad = (n: number) => n.toString().padStart(2, '0');
@@ -103,8 +96,8 @@ async function ensureBaseData(count: number): Promise<SensorLite[]> {
 
     // 2) Vehicle
     const reg = `MH12-FT${i.toString().padStart(4, '0')}`;
-    const vTank = randInt(250, 300);                 // realistic tank size
-    const vMileage = randFloat(2.5, 4.5, 2);         // km/L
+    const vTank = clamp(randInt(250, 300), 200, 1000);      // keep sane
+    const vMileage = clamp(randFloat(2.5, 4.5, 2), 1.0, 10);
 
     const vehicle = await prisma.vehicle.upsert({
       where: { registrationNo: reg },
@@ -156,13 +149,12 @@ async function ensureBaseData(count: number): Promise<SensorLite[]> {
   return sensors;
 }
 
-type SimEvent = 'NORMAL' | 'THEFT' | 'REFUEL';
-
 /**
  * Generate readings for one sensor and insert in batches.
- * NOTE: Schema-aligned fields only.
- * 
- * For this version, generates 10-15 readings per day, for 30 days, with random time-of-day.
+ * Uses CLI probs:
+ *   - theft_prob: chance of a theft event this tick
+ *   - refuel_prob: chance of a refuel event this tick
+ *   - drop_prob: chance of a small additional negative drop (minor anomaly)
  */
 async function generateForSensor(sensor: SensorLite, opts: {
   startUTC: Date;
@@ -181,11 +173,11 @@ async function generateForSensor(sensor: SensorLite, opts: {
     where: { id: sensor.vehicleId },
     select: { tankSize: true, mileageEst: true },
   });
-  const tankSize = Math.max(250, Math.min(300, veh?.tankSize ?? 280));
-  const mileageKmPerL = Math.max(2.0, Math.min(6.0, veh?.mileageEst ?? 3.5));
+  const tankSize = clamp(veh?.tankSize ?? 280, 200, 1000);
+  const mileageKmPerL = clamp(veh?.mileageEst ?? 3.5, 1.0, 10.0);
 
   // Start fuel safely above 200 L, below tank cap
-  let fuel = randFloat(205, Math.min(tankSize - 10, 270), 2);
+  let fuel = clamp(randFloat(205, Math.min(tankSize - 10, 270), 2), FUEL_MIN_BEFORE_REFUEL + 0.1, tankSize - TANK_HEADROOM - 0.1);
   let prevFuel = fuel;
 
   // Start position: slight jitter from base
@@ -198,10 +190,6 @@ async function generateForSensor(sensor: SensorLite, opts: {
   // Slow drift direction for geo pathing
   let driftLat = randNormal(0, 0.0003);
   let driftLon = randNormal(0, 0.0003);
-
-  // Avoid clustering events too close
-  let lastEventTick = -9999;
-  const minEventGapTicks = 2; // Not used in this version, but can be used for event spacing
 
   const BATCH: any[] = [];
   const BATCH_SIZE = 1000;
@@ -221,71 +209,94 @@ async function generateForSensor(sensor: SensorLite, opts: {
       const t = new Date(opts.startUTC.getTime() + day * 24 * 60 * 60 * 1000 + minutesSinceMidnight * 60 * 1000);
       const hour = t.getUTCHours();
 
-      // Day/night movement pattern
+      // SENSOR OFFLINE SIMULATION: skip writing any row
+      if (rand() < opts.offlineProb) {
+        // eslint-disable-next-line no-console
+        console.log(`📡 ${sensor.sensorCode}: Sensor offline at ${t.toISOString()}`);
+        continue;
+      }
+
+      // Day/night movement pattern (single-minute "tick")
       const isDay = hour >= 6 && hour <= 21;
       const meanSpeed = isDay ? 32.0 : 5.0;
       const speedSd = 10.0;
       const moveFlag = rand() > (isDay ? 0.25 : 0.7);
       const rawSpeed = moveFlag ? Math.max(0, randNormal(meanSpeed, speedSd)) : 0;
-      const speed = parseFloat(rawSpeed.toFixed(2));
+      let speed = parseFloat(rawSpeed.toFixed(2));
+      speed = clamp(speed, 0, 120);
+      speed = finiteOr(speed, 0);
 
-      const distanceKm = parseFloat((speed * (1 / 60.0)).toFixed(3)); // 1 minute interval for each reading
+      const distanceKm = parseFloat((speed * (1 / 60.0)).toFixed(3)); // per-minute distance
       odometerKm = parseFloat((odometerKm + distanceKm).toFixed(3));
+      odometerKm = finiteOr(odometerKm, 0);
 
       // Expected burn from driving
-      const expectedBurn = mileageKmPerL > 1e-3 ? distanceKm / mileageKmPerL : 0;
+      const expectedBurn = mileageKmPerL > 1e-6 ? distanceKm / mileageKmPerL : 0;
 
-      // BALANCED EVENT GENERATION: 70% Normal, 20% Theft, 10% Refuel
+      // Event generation from CLI probabilities (with sensible guards)
+      // We evaluate theft, then refuel. If both would occur, theft wins unless fuel is near-empty.
       let eventType: SimEvent = 'NORMAL';
       let theftDrop = 0.0;
       let refuelAdd = 0.0;
 
-      // For this version, allow event every reading
-      const randomValue = rand();
-      if (randomValue < 0.7) {
-        eventType = 'NORMAL';
-      } else if (randomValue < 0.9 && fuel > 30) {
+      const canTheft = fuel > 30;
+      const canRefuel = fuel < tankSize * 0.9;
+
+      if (canTheft && rand() < opts.theftProb) {
         eventType = 'THEFT';
         theftDrop = randFloat(15.0, Math.min(35.0, fuel * 0.4), 2);
-        lastEventTick = j;
-      } else if (randomValue < 1.0 && fuel < tankSize * 0.9) {
-        eventType = 'REFUEL';
-        const room = Math.max(10, tankSize - fuel);
-        refuelAdd = randFloat(25.0, Math.min(80.0, room), 2);
-        lastEventTick = j;
+      }
+
+      if (canRefuel && rand() < opts.refuelProb) {
+        // If theft was selected, prefer theft unless fuel is already very low
+        if (eventType !== 'THEFT' || fuel < 20) {
+          eventType = 'REFUEL';
+          const room = Math.max(10, tankSize - fuel - TANK_HEADROOM);
+          refuelAdd = randFloat(25.0, Math.min(80.0, room), 2);
+        }
+      }
+
+      // Minor random drop/noise event (does not change eventType)
+      let smallDrop = 0.0;
+      if (rand() < opts.dropProb) {
+        smallDrop = randFloat(0.5, 2.5, 2);
       }
 
       // Mild measurement noise
       const noise = randNormal(0, 0.08);
 
       // Compute next fuel, then enforce safety rules
-      let newFuel = fuel - expectedBurn - theftDrop + refuelAdd + noise;
+      let newFuel = fuel - expectedBurn - theftDrop - smallDrop + refuelAdd + noise;
       newFuel = parseFloat(newFuel.toFixed(2));
 
-      // ---------- SAFETY GUARD: never store zero; force refuel if < 1 L ----------
+      // SAFETY GUARD: force refuel if below minimum
       if (newFuel < FUEL_MIN_BEFORE_REFUEL) {
         const maxRoom = Math.max(0, tankSize - newFuel - TANK_HEADROOM);
-        // Ensure at least 100 L, but don't exceed available room or REFUEL_MAX_LITERS.
-        const forcedAdd = clamp(
-          randFloat(REFUEL_MIN_LITERS, Math.min(REFUEL_MAX_LITERS, Math.max(REFUEL_MIN_LITERS, maxRoom))),
-          REFUEL_MIN_LITERS,
-          Math.max(REFUEL_MIN_LITERS, maxRoom)
-        );
-        newFuel = clamp(parseFloat((newFuel + forcedAdd).toFixed(2)), FUEL_MIN_BEFORE_REFUEL, tankSize - TANK_HEADROOM);
-        // Mark it as a refuel event; also reset event cooldown.
+        // We must add at least REFUEL_MIN_LITERS; if not possible, just fill available room.
+        const lower = Math.min(REFUEL_MIN_LITERS, Math.max(REFUEL_MIN_LITERS, maxRoom));
+        const upper = Math.min(REFUEL_MAX_LITERS, maxRoom);
+        let forcedAdd = 0;
+        if (upper <= 0) {
+          // No room (already near full due to noise). Just clamp below cap.
+          forcedAdd = 0;
+        } else if (upper < REFUEL_MIN_LITERS) {
+          forcedAdd = upper; // add what we can
+        } else {
+          forcedAdd = randFloat(REFUEL_MIN_LITERS, upper, 2);
+        }
+        newFuel = parseFloat((newFuel + forcedAdd).toFixed(2));
+        newFuel = clamp(newFuel, FUEL_MIN_BEFORE_REFUEL, tankSize - TANK_HEADROOM);
         if (eventType !== 'REFUEL') {
           eventType = 'REFUEL';
-          lastEventTick = j;
         }
         refuelAdd += forcedAdd;
       } else {
-        // For general bounds, also avoid exact 0 or exact cap.
+        // General bounds & avoid exact cap/zero
         newFuel = clamp(newFuel, FUEL_MIN_BEFORE_REFUEL, tankSize - TANK_HEADROOM);
         newFuel = parseFloat(newFuel.toFixed(2));
       }
-      // --------------------------------------------------------------------------
 
-      // Move position slightly
+      // Move position slightly (random walk + slow drift)
       if (speed > 0.5) {
         lat += randNormal(0, 0.001) + driftLat;
         lon += randNormal(0, 0.001) + driftLon;
@@ -293,44 +304,47 @@ async function generateForSensor(sensor: SensorLite, opts: {
         lat += randNormal(0, 0.00015) + driftLat * 0.5;
         lon += randNormal(0, 0.00015) + driftLon * 0.5;
       }
-      const locationLat = parseFloat(lat.toFixed(6));
-      const locationLong = parseFloat(lon.toFixed(6));
+      // Occasionally re-roll drift so routes don’t run away
+      if (rand() < 0.01) {
+        driftLat = randNormal(0, 0.0003);
+        driftLon = randNormal(0, 0.0003);
+      }
+
+      let locationLat = parseFloat(lat.toFixed(6));
+      let locationLong = parseFloat(lon.toFixed(6));
+      locationLat = finiteOr(locationLat, opts.baseLat);
+      locationLong = finiteOr(locationLong, opts.baseLon);
 
       // Other telemetry
-      const ignitionStatus = speed > 2.0 ? 'ON' : 'OFF';
+      const ignitionStatus = speed > 2.0 ? 'ON' as const : 'OFF' as const;
       const isOverSpeed = speed > 80.0;
-      const deviceVoltage = parseFloat((12.3 + (isDay ? 0.3 : 0.0) + randNormal(0, 0.15)).toFixed(2));
+      let deviceVoltage = parseFloat((12.3 + (isDay ? 0.3 : 0.0) + randNormal(0, 0.15)).toFixed(2));
+      deviceVoltage = clamp(finiteOr(deviceVoltage, 12.0), 10, 15);
 
       const fuel_diff = parseFloat((newFuel - prevFuel).toFixed(2));
       const topic = `${sensor.sensorCode}/data`;
 
-      // SENSOR OFFLINE SIMULATION: offlineProb chance to skip reading (simulate offline sensor)
-      const isOffline = rand() < opts.offlineProb;
-      if (isOffline) {
-        console.log(`📡 ${sensor.sensorCode}: Sensor offline at ${t.toISOString()}`);
-        continue; // Skip this reading
-      }
-
-      // Build SensorReading row (schema-aligned) - ensure no null values in critical fields
-      BATCH.push({
+      // Build row (schema-aligned)
+      const row = {
         timestamp: t,
-        fuelLevel: newFuel || 0, // Ensure fuelLevel is never null
-        locationLat: locationLat || 0,
-        locationLong: locationLong || 0,
-        speed: speed || 0,
+        fuelLevel: finiteOr(newFuel, Math.max(FUEL_MIN_BEFORE_REFUEL, fuel)), // never null/NaN
+        locationLat: finiteOr(locationLat, opts.baseLat),
+        locationLong: finiteOr(locationLong, opts.baseLon),
+        speed: finiteOr(speed, 0),
         ignitionStatus: ignitionStatus || 'OFF',
-        odometerKm: odometerKm || 0,
-        deviceVoltage: deviceVoltage || 12.0,
-        isOverSpeed: isOverSpeed || false,
+        odometerKm: finiteOr(odometerKm, 0),
+        deviceVoltage: finiteOr(deviceVoltage, 12.0),
+        isOverSpeed: Boolean(isOverSpeed),
         raw: {
           source: 'ts-generator',
           sim: {
             tankSize,
             mileageKmPerL,
-            expectedBurn,
-            theftDrop,
-            refuelAdd,
-            noise,
+            expectedBurn: parseFloat(expectedBurn.toFixed(4)),
+            theftDrop: parseFloat(theftDrop.toFixed(2)),
+            refuelAdd: parseFloat(refuelAdd.toFixed(2)),
+            smallDrop: parseFloat(smallDrop.toFixed(2)),
+            noise: parseFloat(noise.toFixed(4)),
             eventType,
             fuel_diff,
             isOverSpeed,
@@ -338,9 +352,10 @@ async function generateForSensor(sensor: SensorLite, opts: {
         },
         topic,
         sensorId: sensor.id,
-      });
+      };
 
-      // Flush periodically
+      BATCH.push(row);
+
       if (BATCH.length >= BATCH_SIZE) {
         await prisma.sensorReading.createMany({ data: BATCH, skipDuplicates: true });
         BATCH.length = 0;
@@ -370,7 +385,7 @@ async function main() {
     offline_prob,
   } = argv;
 
-  // Start at midnight UTC 30 days ago
+  // Start at midnight UTC of today minus `days`
   const now = new Date();
   const startUTC = new Date(Date.UTC(
     now.getUTCFullYear(),
@@ -380,14 +395,13 @@ async function main() {
   ));
   startUTC.setUTCDate(startUTC.getUTCDate() - days);
 
-  // Ensure base entities exist (exactly N)
+  // Ensure base entities exist (idempotent upserts)
   const sensors = await ensureBaseData(sensorsCount);
 
-  console.log(`🛠  Generating 10-15 readings per day × ${days} days × ${sensors.length} sensors`);
-  console.log(`     Start (UTC): ${startUTC.toISOString()} | days: ${days}`);
-  console.log(`     Distribution: 70% Normal, 20% Theft, 10% Refuel`);
-  console.log(`     Offline simulation: ${offline_prob * 100}% chance per reading`);
-  console.log(`     Guards: min fuel=${FUEL_MIN_BEFORE_REFUEL} L, forced refuel ≥ ${REFUEL_MIN_LITERS} L`);
+  console.log(`🛠  Generating ${min_per_day}–${max_per_day} readings/day × ${days} days × ${sensors.length} sensors`);
+  console.log(`     Start (UTC): ${startUTC.toISOString()}`);
+  console.log(`     Probabilities: theft=${theft_prob}, refuel=${refuel_prob}, drop=${drop_prob}, offline=${offline_prob}`);
+  console.log(`     Guards: minFuel=${FUEL_MIN_BEFORE_REFUEL} L, forcedRefuel ≥ ${REFUEL_MIN_LITERS} L, headroom=${TANK_HEADROOM} L`);
 
   for (const s of sensors) {
     await generateForSensor(s, {
@@ -395,12 +409,12 @@ async function main() {
       days,
       minPerDay: min_per_day,
       maxPerDay: max_per_day,
-      theftProb: theft_prob,
-      refuelProb: refuel_prob,
-      dropProb: drop_prob,
+      theftProb: clamp(theft_prob, 0, 1),
+      refuelProb: clamp(refuel_prob, 0, 1),
+      dropProb: clamp(drop_prob, 0, 1),
       baseLat: base_lat,
       baseLon: base_lon,
-      offlineProb: offline_prob,
+      offlineProb: clamp(offline_prob, 0, 1),
     });
 
     // Update lastSeen
@@ -422,6 +436,443 @@ main()
   .finally(async () => {
     await prisma.$disconnect();
   });
+
+
+
+
+
+
+
+
+// // #!/usr/bin/env ts-node
+// /**
+//  * Seed base data (100 routes, vehicles, drivers, sensors) and generate readings.
+//  * - Never inserts a fuelLevel of 0 (auto-refuels before that).
+//  * - If computed fuel drops below 1 L, force a REFUEL of at least 100 L (capped by tank).
+//  * 
+//  * Generates 100 sensors, each with 10-15 readings per day, for 30 days.
+//  */
+
+// import prisma from '../lib/prisma';
+// import yargs from 'yargs';
+// import { hideBin } from 'yargs/helpers';
+
+// // ---------- CLI ----------
+// const argv = yargs(hideBin(process.argv))
+//   .option('sensors', { type: 'number', default: 100, describe: 'Total sensors to ensure & simulate' })
+//   .option('days', { type: 'number', default: 30, describe: 'Total simulation days' })
+//   .option('min_per_day', { type: 'number', default: 10, describe: 'Min readings per day per sensor' })
+//   .option('max_per_day', { type: 'number', default: 15, describe: 'Max readings per day per sensor' })
+//   .option('seed', { type: 'number', default: 2025, describe: 'PRNG seed' })
+//   .option('theft_prob', { type: 'number', default: 0.20, describe: 'Probability of a theft event per tick (20%)' })
+//   .option('refuel_prob', { type: 'number', default: 0.10, describe: 'Probability of a refuel event per tick (10%)' })
+//   .option('drop_prob', { type: 'number', default: 0.05, describe: 'Probability of a small drop event per tick (5%)' })
+//   .option('offline_prob', { type: 'number', default: 0.0001, describe: 'Probability of sensor going offline (15%)' })
+//   .option('base_lat', { type: 'number', default: 12.9716, describe: 'Base latitude' })
+//   .option('base_lon', { type: 'number', default: 77.5946, describe: 'Base longitude' })
+//   .help()
+//   .strict()
+//   .parseSync();
+
+// // ---------- PRNG (deterministic) ----------
+// function mulberry32(seed: number) {
+//   let t = seed >>> 0;
+//   return function () {
+//     t += 0x6D2B79F5;
+//     let r = Math.imul(t ^ (t >>> 15), 1 | t);
+//     r ^= r + Math.imul(r ^ (r >>> 7), 61 | r);
+//     return ((r ^ (r >>> 14)) >>> 0) / 4294967296;
+//   };
+// }
+// const rand = mulberry32(argv.seed);
+
+// function randFloat(min: number, max: number, dp = 2) {
+//   const v = min + (max - min) * rand();
+//   const f = parseFloat(v.toFixed(dp));
+//   return f;
+// }
+// function randInt(min: number, max: number) {
+//   return Math.floor(min + (max - min + 1) * rand());
+// }
+// function randNormal(mean = 0, sd = 1) {
+//   // Box-Muller
+//   let u = 0, v = 0;
+//   while (u === 0) u = rand();
+//   while (v === 0) v = rand();
+//   const z = Math.sqrt(-2.0 * Math.log(u)) * Math.cos(2.0 * Math.PI * v);
+//   return mean + z * sd;
+// }
+// function clamp(n: number, lo: number, hi: number) {
+//   return Math.max(lo, Math.min(hi, n));
+// }
+
+// // ---------- Safety thresholds (new) ----------
+// // If computed fuel would go below this, we force a refuel.
+// const FUEL_MIN_BEFORE_REFUEL = 1.0;     // liters
+// // How much we must add at minimum when we force a refuel.
+// const REFUEL_MIN_LITERS = 100.0;
+// // Upper bound for a single forced refuel (still capped by tank size).
+// const REFUEL_MAX_LITERS = 180.0;
+// // After any refuel, keep a tiny headroom below exact cap to avoid "exactly full".
+// const TANK_HEADROOM = 0.5;
+
+// // ---------- Helpers ----------
+// function truncateToFreqUTC(date: Date, minutes: number) {
+//   const d = new Date(Date.UTC(
+//     date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate(),
+//     date.getUTCHours(), date.getUTCMinutes(), 0, 0
+//   ));
+//   const m = d.getUTCMinutes();
+//   const remainder = m % minutes;
+//   if (remainder !== 0) d.setUTCMinutes(m - remainder, 0, 0);
+//   return d;
+// }
+
+// type SensorLite = { id: string; sensorCode: string; vehicleId: string };
+
+// // Ensure N routes, vehicles, drivers, sensors (idempotent)
+// async function ensureBaseData(count: number): Promise<SensorLite[]> {
+//   const sensors: SensorLite[] = [];
+//   const pad = (n: number) => n.toString().padStart(2, '0');
+
+//   for (let i = 1; i <= count; i++) {
+//     // 1) Route
+//     const route = await prisma.route.upsert({
+//       where: { name: `Route ${i}` },
+//       update: {},
+//       create: {
+//         name: `Route ${i}`,
+//         startPoint: `Depot ${i}`,
+//         endPoint: `Hub ${i}`,
+//       },
+//     });
+
+//     // 2) Vehicle
+//     const reg = `MH12-FT${i.toString().padStart(4, '0')}`;
+//     const vTank = randInt(250, 300);                 // realistic tank size
+//     const vMileage = randFloat(2.5, 4.5, 2);         // km/L
+
+//     const vehicle = await prisma.vehicle.upsert({
+//       where: { registrationNo: reg },
+//       update: {
+//         routeId: route.id,
+//         model: `Model-${i}`,
+//         tankSize: vTank,
+//         mileageEst: vMileage,
+//       },
+//       create: {
+//         registrationNo: reg,
+//         externalVehicleId: `EXT-${reg}`,
+//         model: `Model-${i}`,
+//         tankSize: vTank,
+//         mileageEst: vMileage,
+//         routeId: route.id,
+//       },
+//     });
+
+//     // 3) Driver (1-1 with Vehicle)
+//     const phone = `90000000${pad(i)}${pad(i)}`.slice(0, 10);
+//     await prisma.driver.upsert({
+//       where: { phone },
+//       update: { vehicleId: vehicle.id, name: `Driver ${i}` },
+//       create: {
+//         name: `Driver ${i}`,
+//         phone,
+//         licenseNo: `DL-${i.toString().padStart(6, '0')}`,
+//         vehicleId: vehicle.id,
+//       },
+//     });
+
+//     // 4) Sensor (1-1 with Vehicle)
+//     const sensorCode = `FMB920-${i.toString().padStart(6, '0')}`;
+//     const sensor = await prisma.sensor.upsert({
+//       where: { sensorCode },
+//       update: { vehicleId: vehicle.id, isActive: true, lastSeen: null },
+//       create: {
+//         sensorCode,
+//         isActive: true,
+//         vehicleId: vehicle.id,
+//       },
+//       select: { id: true, sensorCode: true, vehicleId: true },
+//     });
+
+//     sensors.push(sensor);
+//   }
+
+//   return sensors;
+// }
+
+// type SimEvent = 'NORMAL' | 'THEFT' | 'REFUEL';
+
+// /**
+//  * Generate readings for one sensor and insert in batches.
+//  * NOTE: Schema-aligned fields only.
+//  * 
+//  * For this version, generates 10-15 readings per day, for 30 days, with random time-of-day.
+//  */
+// async function generateForSensor(sensor: SensorLite, opts: {
+//   startUTC: Date;
+//   days: number;
+//   minPerDay: number;
+//   maxPerDay: number;
+//   theftProb: number;
+//   refuelProb: number;
+//   dropProb: number;
+//   baseLat: number;
+//   baseLon: number;
+//   offlineProb: number;
+// }) {
+//   // Pull vehicle specs for realism
+//   const veh = await prisma.vehicle.findUnique({
+//     where: { id: sensor.vehicleId },
+//     select: { tankSize: true, mileageEst: true },
+//   });
+//   const tankSize = Math.max(250, Math.min(300, veh?.tankSize ?? 280));
+//   const mileageKmPerL = Math.max(2.0, Math.min(6.0, veh?.mileageEst ?? 3.5));
+
+//   // Start fuel safely above 200 L, below tank cap
+//   let fuel = randFloat(205, Math.min(tankSize - 10, 270), 2);
+//   let prevFuel = fuel;
+
+//   // Start position: slight jitter from base
+//   let lat = opts.baseLat + randNormal(0, 0.01);
+//   let lon = opts.baseLon + randNormal(0, 0.01);
+
+//   // Synthetic odometer (km)
+//   let odometerKm = randFloat(25_000, 180_000, 2);
+
+//   // Slow drift direction for geo pathing
+//   let driftLat = randNormal(0, 0.0003);
+//   let driftLon = randNormal(0, 0.0003);
+
+//   // Avoid clustering events too close
+//   let lastEventTick = -9999;
+//   const minEventGapTicks = 2; // Not used in this version, but can be used for event spacing
+
+//   const BATCH: any[] = [];
+//   const BATCH_SIZE = 1000;
+
+//   // For each day, generate N readings at random times
+//   for (let day = 0; day < opts.days; day++) {
+//     const readingsToday = randInt(opts.minPerDay, opts.maxPerDay);
+//     // Generate random times (minutes since midnight) and sort
+//     const times: number[] = [];
+//     for (let j = 0; j < readingsToday; j++) {
+//       times.push(randInt(0, 1439)); // 0 to 1439 minutes in a day
+//     }
+//     times.sort((a, b) => a - b);
+
+//     for (let j = 0; j < readingsToday; j++) {
+//       const minutesSinceMidnight = times[j];
+//       const t = new Date(opts.startUTC.getTime() + day * 24 * 60 * 60 * 1000 + minutesSinceMidnight * 60 * 1000);
+//       const hour = t.getUTCHours();
+
+//       // Day/night movement pattern
+//       const isDay = hour >= 6 && hour <= 21;
+//       const meanSpeed = isDay ? 32.0 : 5.0;
+//       const speedSd = 10.0;
+//       const moveFlag = rand() > (isDay ? 0.25 : 0.7);
+//       const rawSpeed = moveFlag ? Math.max(0, randNormal(meanSpeed, speedSd)) : 0;
+//       const speed = parseFloat(rawSpeed.toFixed(2));
+
+//       const distanceKm = parseFloat((speed * (1 / 60.0)).toFixed(3)); // 1 minute interval for each reading
+//       odometerKm = parseFloat((odometerKm + distanceKm).toFixed(3));
+
+//       // Expected burn from driving
+//       const expectedBurn = mileageKmPerL > 1e-3 ? distanceKm / mileageKmPerL : 0;
+
+//       // BALANCED EVENT GENERATION: 70% Normal, 20% Theft, 10% Refuel
+//       let eventType: SimEvent = 'NORMAL';
+//       let theftDrop = 0.0;
+//       let refuelAdd = 0.0;
+
+//       // For this version, allow event every reading
+//       const randomValue = rand();
+//       if (randomValue < 0.7) {
+//         eventType = 'NORMAL';
+//       } else if (randomValue < 0.9 && fuel > 30) {
+//         eventType = 'THEFT';
+//         theftDrop = randFloat(15.0, Math.min(35.0, fuel * 0.4), 2);
+//         lastEventTick = j;
+//       } else if (randomValue < 1.0 && fuel < tankSize * 0.9) {
+//         eventType = 'REFUEL';
+//         const room = Math.max(10, tankSize - fuel);
+//         refuelAdd = randFloat(25.0, Math.min(80.0, room), 2);
+//         lastEventTick = j;
+//       }
+
+//       // Mild measurement noise
+//       const noise = randNormal(0, 0.08);
+
+//       // Compute next fuel, then enforce safety rules
+//       let newFuel = fuel - expectedBurn - theftDrop + refuelAdd + noise;
+//       newFuel = parseFloat(newFuel.toFixed(2));
+
+//       // ---------- SAFETY GUARD: never store zero; force refuel if < 1 L ----------
+//       if (newFuel < FUEL_MIN_BEFORE_REFUEL) {
+//         const maxRoom = Math.max(0, tankSize - newFuel - TANK_HEADROOM);
+//         // Ensure at least 100 L, but don't exceed available room or REFUEL_MAX_LITERS.
+//         const forcedAdd = clamp(
+//           randFloat(REFUEL_MIN_LITERS, Math.min(REFUEL_MAX_LITERS, Math.max(REFUEL_MIN_LITERS, maxRoom))),
+//           REFUEL_MIN_LITERS,
+//           Math.max(REFUEL_MIN_LITERS, maxRoom)
+//         );
+//         newFuel = clamp(parseFloat((newFuel + forcedAdd).toFixed(2)), FUEL_MIN_BEFORE_REFUEL, tankSize - TANK_HEADROOM);
+//         // Mark it as a refuel event; also reset event cooldown.
+//         if (eventType !== 'REFUEL') {
+//           eventType = 'REFUEL';
+//           lastEventTick = j;
+//         }
+//         refuelAdd += forcedAdd;
+//       } else {
+//         // For general bounds, also avoid exact 0 or exact cap.
+//         newFuel = clamp(newFuel, FUEL_MIN_BEFORE_REFUEL, tankSize - TANK_HEADROOM);
+//         newFuel = parseFloat(newFuel.toFixed(2));
+//       }
+//       // --------------------------------------------------------------------------
+
+//       // Move position slightly
+//       if (speed > 0.5) {
+//         lat += randNormal(0, 0.001) + driftLat;
+//         lon += randNormal(0, 0.001) + driftLon;
+//       } else {
+//         lat += randNormal(0, 0.00015) + driftLat * 0.5;
+//         lon += randNormal(0, 0.00015) + driftLon * 0.5;
+//       }
+//       const locationLat = parseFloat(lat.toFixed(6));
+//       const locationLong = parseFloat(lon.toFixed(6));
+
+//       // Other telemetry
+//       const ignitionStatus = speed > 2.0 ? 'ON' : 'OFF';
+//       const isOverSpeed = speed > 80.0;
+//       const deviceVoltage = parseFloat((12.3 + (isDay ? 0.3 : 0.0) + randNormal(0, 0.15)).toFixed(2));
+
+//       const fuel_diff = parseFloat((newFuel - prevFuel).toFixed(2));
+//       const topic = `${sensor.sensorCode}/data`;
+
+//       // SENSOR OFFLINE SIMULATION: offlineProb chance to skip reading (simulate offline sensor)
+//       const isOffline = rand() < opts.offlineProb;
+//       if (isOffline) {
+//         console.log(`📡 ${sensor.sensorCode}: Sensor offline at ${t.toISOString()}`);
+//         continue; // Skip this reading
+//       }
+
+//       // Build SensorReading row (schema-aligned) - ensure no null values in critical fields
+//       BATCH.push({
+//         timestamp: t,
+//         fuelLevel: newFuel || 0, // Ensure fuelLevel is never null
+//         locationLat: locationLat || 0,
+//         locationLong: locationLong || 0,
+//         speed: speed || 0,
+//         ignitionStatus: ignitionStatus || 'OFF',
+//         odometerKm: odometerKm || 0,
+//         deviceVoltage: deviceVoltage || 12.0,
+//         isOverSpeed: isOverSpeed || false,
+//         raw: {
+//           source: 'ts-generator',
+//           sim: {
+//             tankSize,
+//             mileageKmPerL,
+//             expectedBurn,
+//             theftDrop,
+//             refuelAdd,
+//             noise,
+//             eventType,
+//             fuel_diff,
+//             isOverSpeed,
+//           },
+//         },
+//         topic,
+//         sensorId: sensor.id,
+//       });
+
+//       // Flush periodically
+//       if (BATCH.length >= BATCH_SIZE) {
+//         await prisma.sensorReading.createMany({ data: BATCH, skipDuplicates: true });
+//         BATCH.length = 0;
+//       }
+
+//       prevFuel = newFuel;
+//       fuel = newFuel;
+//     }
+//   }
+
+//   if (BATCH.length > 0) {
+//     await prisma.sensorReading.createMany({ data: BATCH, skipDuplicates: true });
+//   }
+// }
+
+// async function main() {
+//   const {
+//     sensors: sensorsCount,
+//     days,
+//     min_per_day,
+//     max_per_day,
+//     theft_prob,
+//     refuel_prob,
+//     drop_prob,
+//     base_lat,
+//     base_lon,
+//     offline_prob,
+//   } = argv;
+
+//   // Start at midnight UTC 30 days ago
+//   const now = new Date();
+//   const startUTC = new Date(Date.UTC(
+//     now.getUTCFullYear(),
+//     now.getUTCMonth(),
+//     now.getUTCDate(),
+//     0, 0, 0, 0
+//   ));
+//   startUTC.setUTCDate(startUTC.getUTCDate() - days);
+
+//   // Ensure base entities exist (exactly N)
+//   const sensors = await ensureBaseData(sensorsCount);
+
+//   console.log(`🛠  Generating 10-15 readings per day × ${days} days × ${sensors.length} sensors`);
+//   console.log(`     Start (UTC): ${startUTC.toISOString()} | days: ${days}`);
+//   console.log(`     Distribution: 70% Normal, 20% Theft, 10% Refuel`);
+//   console.log(`     Offline simulation: ${offline_prob * 100}% chance per reading`);
+//   console.log(`     Guards: min fuel=${FUEL_MIN_BEFORE_REFUEL} L, forced refuel ≥ ${REFUEL_MIN_LITERS} L`);
+
+//   for (const s of sensors) {
+//     await generateForSensor(s, {
+//       startUTC,
+//       days,
+//       minPerDay: min_per_day,
+//       maxPerDay: max_per_day,
+//       theftProb: theft_prob,
+//       refuelProb: refuel_prob,
+//       dropProb: drop_prob,
+//       baseLat: base_lat,
+//       baseLon: base_lon,
+//       offlineProb: offline_prob,
+//     });
+
+//     // Update lastSeen
+//     await prisma.sensor.update({
+//       where: { id: s.id },
+//       data: { lastSeen: new Date() },
+//     });
+//     console.log(`  ✓ Inserted readings for ${s.sensorCode}`);
+//   }
+
+//   console.log('✅ Done.');
+// }
+
+// main()
+//   .catch((e) => {
+//     console.error('❌ Error:', e);
+//     process.exit(1);
+//   })
+//   .finally(async () => {
+//     await prisma.$disconnect();
+//   });
+
+
+
+
+
 
 
 

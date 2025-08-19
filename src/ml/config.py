@@ -1,95 +1,36 @@
-# """Central configuration for PetroTrack ML inference/training."""
-# from pathlib import Path
-
-# # ---- Paths ----
-# BASE_DIR: Path = Path(__file__).resolve().parent
-
-# # Model artifacts
-# MODEL_PATH: Path = BASE_DIR / "/Users/shashwat/Desktop/SIDEMEN/model/catboost_model_random_tuned.cbm"
-# LABEL_ENCODER_PATH: Path = BASE_DIR / "/Users/shashwat/Desktop/SIDEMEN/label_encoder.pkl"
-
-# # Default CSVs (used by model_runner / examples)
-# DEFAULT_INPUT_CSV: Path = BASE_DIR / "synthetic_fuel_11000_rules.csv"
-# DEFAULT_OUTPUT_CSV: Path = BASE_DIR / "vehicle_events_noisy_no_flag.csv"
-
-# # ---- Domain constants ----
-# SPEED_LIMIT_KMH: int = 60  # used to (re)derive isOverSpeed if needed
-
-# # ---- Feature contract ----
-# # Your uploaded dataset (synthetic_fuel_11000_rules.csv) has these base columns:
-# # ['timestamp','fuelLevel','previous_fuel_level','distanceKm','locationLat',
-# #  'locationLong','speed','ignitionStatus','isOverSpeed','fuel_diff','eventType']
-# #
-# # The model was trained with the base columns + simple time features.
-# # If your current model ignores time features, it will safely ignore extras.
-# MODEL_FEATURES = [
-#     "fuelLevel",
-#     "previous_fuel_level",
-#     "distanceKm",
-#     "locationLat",
-#     "locationLong",
-#     "speed",
-#     "ignitionStatus",  # categorical -> will be mapped to 0/1
-#     "isOverSpeed",     # bool -> 0/1
-#     "fuel_diff",
-
-#     # engineered from timestamp
-#     "hour",
-#     "day_of_week",
-#     "is_weekend",
-# ]
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 #!/usr/bin/env python3
-"""Central config: model paths, features, constants."""
+"""
+Central configuration for paths and common options.
+Override via environment variables if needed.
+"""
 
 from pathlib import Path
+import os
 
-BASE_DIR = Path(__file__).resolve().parent
+# Base project dir (use current directory for Docker container)
+BASE = Path(__file__).parent
 
 # Artifacts
-MODEL_PATH = "src/ml/catboost_model_random_tuned.cbm"
-LABEL_ENCODER_PATH ="src/ml/label_encoder.pkl"
+MODEL_PATH = Path(os.getenv("MODEL_PATH", BASE / "catboost_model_random_search.cbm"))
+LABEL_ENCODER_PATH = Path(os.getenv("LABEL_ENCODER_PATH", BASE / "label_encoder.joblib"))
 
-# Speed policy (used to derive isOverSpeed if missing)
-SPEED_LIMIT_KMH = 60
+# Data defaults (not used in API mode, but kept for batch processing)
+DEFAULT_INPUT_CSV = Path(os.getenv("INPUT_CSV", BASE / "vehicle_telematics_11000.csv"))
+DEFAULT_OUTPUT_CSV = Path(os.getenv("OUTPUT_CSV", BASE / "synthetic_fuel_11000_rules.csv"))
 
-# Feature contract (train & inference must match this)
-MODEL_FEATURES = [
-    "fuelLevel",
-    "previous_fuel_level",
-    "distanceKm",
-    "locationLat",
-    "locationLong",
-    "speed",
-    "ignitionStatus",
-    "isOverSpeed",
-    "fuel_diff",
-    "hour",
-    "day_of_week",
-    "is_weekend",
-]
+# Inference settings
+RANDOM_SEED = int(os.getenv("RANDOM_SEED", "20250818"))
 
+# API settings
+API_HOST = os.getenv("API_HOST", "0.0.0.0")
+API_PORT = int(os.getenv("API_PORT", "5001"))
+API_DEBUG = os.getenv("API_DEBUG", "false").lower() in {"1", "true", "yes", "y"}
 
+# Columns expected by training (drop these if present)
+DROP_COLS_IF_PRESENT = ["timestamp"]
 
+# Categorical columns for CatBoost (after normalization)
+CATEGORICAL_COLS = ["ignition_status"]
 
-
-
-
-
-
+# The target column name used in training
+TARGET_COL = "event_type"
