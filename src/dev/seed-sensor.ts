@@ -43,6 +43,22 @@ function mulberry32(seed: number) {
     return ((r ^ (r >>> 14)) >>> 0) / 4294967296;
   };
 }
+
+// Create unique seed for each sensor based on sensor ID and base seed
+function createSensorSeed(baseSeed: number, sensorId: string, sensorIndex: number): number {
+  // Hash the sensor ID to create a unique number
+  let hash = 0;
+  for (let i = 0; i < sensorId.length; i++) {
+    const char = sensorId.charCodeAt(i);
+    hash = ((hash << 5) - hash) + char;
+    hash = hash & hash; // Convert to 32-bit integer
+  }
+  
+  // Combine base seed, hash, and sensor index for uniqueness
+  return baseSeed + hash + sensorIndex * 1000;
+}
+
+// Global rand function for base data generation
 const rand = mulberry32(argv.seed);
 
 function randFloat(min: number, max: number, dp = 2) {
@@ -156,7 +172,7 @@ async function ensureBaseData(count: number): Promise<SensorLite[]> {
  *   - refuel_prob: chance of a refuel event this tick
  *   - drop_prob: chance of a small additional negative drop (minor anomaly)
  */
-async function generateForSensor(sensor: SensorLite, opts: {
+async function generateForSensor(sensor: SensorLite, sensorIndex: number, opts: {
   startUTC: Date;
   days: number;
   minPerDay: number;
@@ -167,7 +183,29 @@ async function generateForSensor(sensor: SensorLite, opts: {
   baseLat: number;
   baseLon: number;
   offlineProb: number;
+  baseSeed: number;
 }) {
+  // Create unique random generator for this sensor
+  const sensorSeed = createSensorSeed(opts.baseSeed, sensor.sensorCode, sensorIndex);
+  const sensorRand = mulberry32(sensorSeed);
+  
+  // Helper functions using sensor-specific random generator
+  function sensorRandFloat(min: number, max: number, dp = 2) {
+    const v = min + (max - min) * sensorRand();
+    const f = parseFloat(v.toFixed(dp));
+    return f;
+  }
+  function sensorRandInt(min: number, max: number) {
+    return Math.floor(min + (max - min + 1) * sensorRand());
+  }
+  function sensorRandNormal(mean = 0, sd = 1) {
+    let u = 0, v = 0;
+    while (u === 0) u = sensorRand();
+    while (v === 0) v = sensorRand();
+    const z = Math.sqrt(-2.0 * Math.log(u)) * Math.cos(2.0 * Math.PI * v);
+    return mean + z * sd;
+  }
+
   // Pull vehicle specs for realism
   const veh = await prisma.vehicle.findUnique({
     where: { id: sensor.vehicleId },
@@ -177,19 +215,19 @@ async function generateForSensor(sensor: SensorLite, opts: {
   const mileageKmPerL = clamp(veh?.mileageEst ?? 3.5, 1.0, 10.0);
 
   // Start fuel safely above 200 L, below tank cap
-  let fuel = clamp(randFloat(205, Math.min(tankSize - 10, 270), 2), FUEL_MIN_BEFORE_REFUEL + 0.1, tankSize - TANK_HEADROOM - 0.1);
+  let fuel = clamp(sensorRandFloat(205, Math.min(tankSize - 10, 270), 2), FUEL_MIN_BEFORE_REFUEL + 0.1, tankSize - TANK_HEADROOM - 0.1);
   let prevFuel = fuel;
 
   // Start position: slight jitter from base
-  let lat = opts.baseLat + randNormal(0, 0.01);
-  let lon = opts.baseLon + randNormal(0, 0.01);
+  let lat = opts.baseLat + sensorRandNormal(0, 0.01);
+  let lon = opts.baseLon + sensorRandNormal(0, 0.01);
 
   // Synthetic odometer (km)
-  let odometerKm = randFloat(25_000, 180_000, 2);
+  let odometerKm = sensorRandFloat(25_000, 180_000, 2);
 
   // Slow drift direction for geo pathing
-  let driftLat = randNormal(0, 0.0003);
-  let driftLon = randNormal(0, 0.0003);
+  let driftLat = sensorRandNormal(0, 0.0003);
+  let driftLon = sensorRandNormal(0, 0.0003);
 
   const BATCH: any[] = [];
   const BATCH_SIZE = 1000;
@@ -200,7 +238,7 @@ async function generateForSensor(sensor: SensorLite, opts: {
     // Generate random times (minutes since midnight) and sort
     const times: number[] = [];
     for (let j = 0; j < readingsToday; j++) {
-      times.push(randInt(0, 1439)); // 0 to 1439 minutes in a day
+      times.push(sensorRandInt(0, 1439)); // 0 to 1439 minutes in a day
     }
     times.sort((a, b) => a - b);
 
@@ -210,7 +248,7 @@ async function generateForSensor(sensor: SensorLite, opts: {
       const hour = t.getUTCHours();
 
       // SENSOR OFFLINE SIMULATION: skip writing any row
-      if (rand() < opts.offlineProb) {
+      if (sensorRand() < opts.offlineProb) {
         // eslint-disable-next-line no-console
         console.log(`📡 ${sensor.sensorCode}: Sensor offline at ${t.toISOString()}`);
         continue;
@@ -220,8 +258,8 @@ async function generateForSensor(sensor: SensorLite, opts: {
       const isDay = hour >= 6 && hour <= 21;
       const meanSpeed = isDay ? 32.0 : 5.0;
       const speedSd = 10.0;
-      const moveFlag = rand() > (isDay ? 0.25 : 0.7);
-      const rawSpeed = moveFlag ? Math.max(0, randNormal(meanSpeed, speedSd)) : 0;
+      const moveFlag = sensorRand() > (isDay ? 0.25 : 0.7);
+      const rawSpeed = moveFlag ? Math.max(0, sensorRandNormal(meanSpeed, speedSd)) : 0;
       let speed = parseFloat(rawSpeed.toFixed(2));
       speed = clamp(speed, 0, 120);
       speed = finiteOr(speed, 0);
@@ -242,28 +280,28 @@ async function generateForSensor(sensor: SensorLite, opts: {
       const canTheft = fuel > 30;
       const canRefuel = fuel < tankSize * 0.9;
 
-      if (canTheft && rand() < opts.theftProb) {
+      if (canTheft && sensorRand() < opts.theftProb) {
         eventType = 'THEFT';
-        theftDrop = randFloat(15.0, Math.min(35.0, fuel * 0.4), 2);
+        theftDrop = sensorRandFloat(15.0, Math.min(35.0, fuel * 0.4), 2);
       }
 
-      if (canRefuel && rand() < opts.refuelProb) {
+      if (canRefuel && sensorRand() < opts.refuelProb) {
         // If theft was selected, prefer theft unless fuel is already very low
         if (eventType !== 'THEFT' || fuel < 20) {
           eventType = 'REFUEL';
           const room = Math.max(10, tankSize - fuel - TANK_HEADROOM);
-          refuelAdd = randFloat(25.0, Math.min(80.0, room), 2);
+          refuelAdd = sensorRandFloat(25.0, Math.min(80.0, room), 2);
         }
       }
 
       // Minor random drop/noise event (does not change eventType)
       let smallDrop = 0.0;
-      if (rand() < opts.dropProb) {
-        smallDrop = randFloat(0.5, 2.5, 2);
+      if (sensorRand() < opts.dropProb) {
+        smallDrop = sensorRandFloat(0.5, 2.5, 2);
       }
 
       // Mild measurement noise
-      const noise = randNormal(0, 0.08);
+      const noise = sensorRandNormal(0, 0.08);
 
       // Compute next fuel, then enforce safety rules
       let newFuel = fuel - expectedBurn - theftDrop - smallDrop + refuelAdd + noise;
@@ -282,7 +320,7 @@ async function generateForSensor(sensor: SensorLite, opts: {
         } else if (upper < REFUEL_MIN_LITERS) {
           forcedAdd = upper; // add what we can
         } else {
-          forcedAdd = randFloat(REFUEL_MIN_LITERS, upper, 2);
+          forcedAdd = sensorRandFloat(REFUEL_MIN_LITERS, upper, 2);
         }
         newFuel = parseFloat((newFuel + forcedAdd).toFixed(2));
         newFuel = clamp(newFuel, FUEL_MIN_BEFORE_REFUEL, tankSize - TANK_HEADROOM);
@@ -403,8 +441,9 @@ async function main() {
   console.log(`     Probabilities: theft=${theft_prob}, refuel=${refuel_prob}, drop=${drop_prob}, offline=${offline_prob}`);
   console.log(`     Guards: minFuel=${FUEL_MIN_BEFORE_REFUEL} L, forcedRefuel ≥ ${REFUEL_MIN_LITERS} L, headroom=${TANK_HEADROOM} L`);
 
-  for (const s of sensors) {
-    await generateForSensor(s, {
+  for (let i = 0; i < sensors.length; i++) {
+    const s = sensors[i];
+    await generateForSensor(s, i, {
       startUTC,
       days,
       minPerDay: min_per_day,
@@ -415,6 +454,7 @@ async function main() {
       baseLat: base_lat,
       baseLon: base_lon,
       offlineProb: clamp(offline_prob, 0, 1),
+      baseSeed: argv.seed,
     });
 
     // Update lastSeen
@@ -436,6 +476,12 @@ main()
   .finally(async () => {
     await prisma.$disconnect();
   });
+
+
+
+
+
+
 
 
 
@@ -887,7 +933,7 @@ main()
 
 
 
-// #!/usr/bin/env ts-node
+// // // #!/usr/bin/env ts-node
 // /**
 //  * Seed base data (5 routes, vehicles, drivers, sensors) and generate readings.
 //  * Schema-aligned for current models: uses odometerKm, processed defaults to false.

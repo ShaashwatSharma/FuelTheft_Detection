@@ -51,7 +51,7 @@
 								{
 									"key": "include",
 									"value": "alerts,readings,histories,events",
-									"description": "Comma-separated list of data to include"
+									"description": "Comma-separated list of data to include (alerts, readings, histories, events)"
 								},
 								{
 									"key": "fromDate",
@@ -107,37 +107,6 @@
 							]
 						},
 						"description": "Get sensor status for a specific vehicle"
-					},
-					"response": []
-				},
-				{
-					"name": "Get Sensor Status by Status Type",
-					"request": {
-						"method": "GET",
-						"header": [],
-						"url": {
-							"raw": "{{base_url}}/sensor?status=OFFLINE&fromDate={{from_date}}&toDate={{to_date}}",
-							"host": ["{{base_url}}"],
-							"path": ["sensor"],
-							"query": [
-								{
-									"key": "status",
-									"value": "OFFLINE",
-									"description": "Sensor status filter (OK, OFFLINE, FAULTY, UNKNOWN)"
-								},
-								{
-									"key": "fromDate",
-									"value": "{{from_date}}",
-									"description": "Start date for health events"
-								},
-								{
-									"key": "toDate",
-									"value": "{{to_date}}",
-									"description": "End date for health events"
-								}
-							]
-						},
-						"description": "Get sensors with specific status and health events within date range"
 					},
 					"response": []
 				}
@@ -197,7 +166,7 @@
 								{
 									"key": "limit",
 									"value": "100",
-									"description": "Number of records to return"
+									"description": "Number of records to return (or 'all' for unlimited)"
 								},
 								{
 									"key": "offset",
@@ -228,7 +197,7 @@
 								{
 									"key": "type",
 									"value": "THEFT,REFUEL",
-									"description": "Comma-separated list of event types"
+									"description": "Comma-separated list of event types (THEFT, REFUEL, NORMAL, LOW_FUEL, SENSOR_HEALTH, UNKNOWN)"
 								},
 								{
 									"key": "fromDate",
@@ -269,6 +238,27 @@
 							]
 						},
 						"description": "Get history records for a specific sensor"
+					},
+					"response": []
+				},
+				{
+					"name": "Get All History (Unlimited)",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/history?limit=all",
+							"host": ["{{base_url}}"],
+							"path": ["history"],
+							"query": [
+								{
+									"key": "limit",
+									"value": "all",
+									"description": "Get all records without pagination"
+								}
+							]
+						},
+						"description": "Get all history records without pagination limits"
 					},
 					"response": []
 				}
