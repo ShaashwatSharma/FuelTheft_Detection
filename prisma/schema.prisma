@@ -62,10 +62,6 @@ model Sensor {
   vehicle   Vehicle @relation(fields: [vehicleId], references: [id])
   vehicleId String  @unique
 
-  // Fuel calibration data
-  fuelCalibration Json? // Array of {level: number, liters: number}
-  tankCapacity     Float? // Tank capacity in liters
-
   readings SensorReading[]
   Event    Event[]
   Alert    Alert[]

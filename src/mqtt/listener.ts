@@ -4,12 +4,6 @@ import prisma from '../lib/prisma';
 import dotenv from 'dotenv';
 import fs from 'fs';
 import path from 'path';
-import { 
-  levelToLiters, 
-  isValidFuelReading, 
-  DEFAULT_CALIBRATION, 
-  extractCalibrationArrays 
-} from '../utils/fuelCalibration';
 
 dotenv.config();
 
@@ -180,21 +174,8 @@ const fromFMB920 = (data: any) => {
   // Extract timestamp from FMB920 data
   const timestamp = data?.ts ? new Date(data.ts) : new Date();
   
-  // Validate fuel reading before processing
-  const isValidReading = isValidFuelReading(data);
-  
-  // Fuel level calibration (parameter 241) - convert raw to liters
-  let fuelLevel = null;
-  if (isValidReading) {
-    const raw241 = toFloat(data?.['241']);
-    if (raw241 !== null && !isNaN(raw241)) {
-      const { levels, liters } = extractCalibrationArrays(DEFAULT_CALIBRATION);
-      fuelLevel = levelToLiters(raw241, levels, liters);
-      
-      // Log calibration for debugging
-      console.log(`🔧 Fuel Calibration: Raw=${raw241} → ${fuelLevel?.toFixed(2)}L`);
-    }
-  }
+  // Fuel level (parameter 241) - save raw value
+  const fuelLevel = toFloat(data?.['241']);
   
   // Location conversion (FMB920 format) - coordinates already in decimal degrees
   const latRaw = toFloat(data?.['66']);
