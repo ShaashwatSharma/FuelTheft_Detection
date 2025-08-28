@@ -4,6 +4,12 @@ import prisma from '../lib/prisma';
 import dotenv from 'dotenv';
 import fs from 'fs';
 import path from 'path';
+import { 
+  levelToLiters, 
+  isValidFuelReading, 
+  DEFAULT_CALIBRATION, 
+  extractCalibrationArrays 
+} from '../utils/fuelCalibration';
 
 dotenv.config();
 
@@ -58,12 +64,12 @@ const createMqttOptions = (thingConfig: typeof THING_CONFIGS[0]): mqtt.IClientOp
       key: fs.readFileSync(path.join(certDir, privateKeyFile)),
       cert: fs.readFileSync(path.join(certDir, certificateFile)),
       ca: fs.readFileSync(path.join(certDir, rootCAFile)),
-      protocol: 'mqtts',
-      rejectUnauthorized: true,
-      keepalive: 60,
-      reconnectPeriod: 3000,
-    };
-  } catch (err) {
+  protocol: 'mqtts',
+    rejectUnauthorized: true,
+    keepalive: 60,
+    reconnectPeriod: 3000,
+  };
+} catch (err) {
     console.error(`❌ Certificate files not found for ${thingConfig.thingName}:`, err);
     throw new Error(`Missing certificates for ${thingConfig.thingName}`);
   }
@@ -83,9 +89,9 @@ const clients: { [thingName: string]: mqtt.MqttClient } = {};
 // Create and manage MQTT connections for each Thing
 const createThingConnection = (thingConfig: typeof THING_CONFIGS[0]) => {
   const mqttOptions = createMqttOptions(thingConfig);
-  const client = mqtt.connect(brokerUrl, mqttOptions);
+const client = mqtt.connect(brokerUrl, mqttOptions);
 
-  client.on('connect', () => {
+client.on('connect', () => {
     console.log(`✅ Connected ${thingConfig.thingName} to ${brokerUrl}`);
     client.subscribe(thingConfig.topic, (err) => {
       if (err) {
@@ -93,8 +99,8 @@ const createThingConnection = (thingConfig: typeof THING_CONFIGS[0]) => {
       } else {
         console.log(`📡 ${thingConfig.thingName} subscribed to: ${thingConfig.topic}`);
       }
-    });
   });
+});
 
   client.on('error', (err) => {
     console.error(`❌ MQTT error for ${thingConfig.thingName}:`, err);
@@ -174,14 +180,27 @@ const fromFMB920 = (data: any) => {
   // Extract timestamp from FMB920 data
   const timestamp = data?.ts ? new Date(data.ts) : new Date();
   
-  // Fuel level (parameter 25) - save ALL values including null and extreme values
-  const fuelLevel = toFloat(data?.['25']);
+  // Validate fuel reading before processing
+  const isValidReading = isValidFuelReading(data);
   
-  // Location conversion (FMB920 format) - save ALL values
+  // Fuel level calibration (parameter 241) - convert raw to liters
+  let fuelLevel = null;
+  if (isValidReading) {
+    const raw241 = toFloat(data?.['241']);
+    if (raw241 !== null && !isNaN(raw241)) {
+      const { levels, liters } = extractCalibrationArrays(DEFAULT_CALIBRATION);
+      fuelLevel = levelToLiters(raw241, levels, liters);
+      
+      // Log calibration for debugging
+      console.log(`🔧 Fuel Calibration: Raw=${raw241} → ${fuelLevel?.toFixed(2)}L`);
+    }
+  }
+  
+  // Location conversion (FMB920 format) - coordinates already in decimal degrees
   const latRaw = toFloat(data?.['66']);
   const lngRaw = toFloat(data?.['67']);
-  const locationLat = latRaw ? latRaw / 100000 : null;
-  const locationLong = lngRaw ? lngRaw / 100000 : null;
+  const locationLat = latRaw ? latRaw : null;
+  const locationLong = lngRaw ? lngRaw : null;
   
   // Speed (parameter 21) - save ALL values
   const speed = toFloat(data?.['21']);
@@ -215,7 +234,7 @@ const fromFMB920 = (data: any) => {
 /** Extract vehicle identity from FMB920 data */
 const extractVehicleIdentity = (payload: any, sensorCode: string, thingName: string) => {
   const body = (payload?.state?.reported) ? payload.state.reported : payload;
-  
+
   // Try to extract vehicle info from FMB920 data
   // You might need to add vehicle mapping logic here
   const regNo = [body?.regNo, body?.vehicleId, body?.vehicleName]
@@ -332,9 +351,9 @@ const handleMessage = async (thingConfig: typeof THING_CONFIGS[0], topic: string
 
     // Insert reading (duplicate-safe on [sensorId, timestamp])
     try {
-      await prisma.sensorReading.create({
-        data: {
-          sensorId: sensor.id,
+    await prisma.sensorReading.create({
+      data: {
+        sensorId: sensor.id,
           timestamp: reading.timestamp,
           fuelLevel: reading.fuelLevel ?? undefined,
           locationLat: reading.locationLat ?? undefined,
@@ -347,8 +366,8 @@ const handleMessage = async (thingConfig: typeof THING_CONFIGS[0], topic: string
           isOverSpeed: reading.isOverSpeed ?? undefined,
           raw: payload,
           topic: topicStr,
-        },
-      });
+      },
+    });
       console.log(`✅ [${thingConfig.thingName}] Stored reading for sensor %s @ %s (fuel: %s, speed: %s)`, 
         sensorCode, 
         reading.timestamp.toISOString(),
