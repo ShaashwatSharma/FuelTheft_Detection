@@ -174,8 +174,8 @@ const fromFMB920 = (data: any) => {
   // Extract timestamp from FMB920 data
   const timestamp = data?.ts ? new Date(data.ts) : new Date();
   
-  // Fuel level (parameter 241) - save raw value
-  const fuelLevel = toFloat(data?.['241']);
+  // Fuel level (parameter 270) - BLE Fuel Level #1
+  const fuelLevel = toFloat(data?.['270']);
   
   // Location conversion (FMB920 format) - parse latlng string
   let locationLat = null;
@@ -195,23 +195,26 @@ const fromFMB920 = (data: any) => {
     }
   }
   
-  // Speed (parameter 21) - save ALL values
-  const speed = toFloat(data?.['21']);
+  // Speed (parameter sp) - actual speed in km/h
+  const speed = toFloat(data?.sp);
   
-  // Ignition status (parameter 1) - save ALL values
-  const ignitionStatus = normalizeIgnition(data?.['1']);
+  // Ignition status (parameter 239) - Digital Input 1
+  const ignitionStatus = normalizeIgnition(data?.['239']);
   
-  // Odometer (parameter 16 or 241) - save ALL values
-  const odometerKm = toFloat(data?.['16']) || toFloat(data?.['241']);
+  // Odometer (parameter 16) - convert from meters to km
+  const odometerMeters = toFloat(data?.['16']);
+  const odometerKm = odometerMeters ? odometerMeters / 1000 : null;
+  
+  // Device voltage (parameter 66) - External vehicle voltage, scale from mV to V
+  const deviceVoltageRaw = toFloat(data?.['66']);
+  const deviceVoltage = deviceVoltageRaw ? deviceVoltageRaw / 1000 : null;
   
   // Additional FMB920 data fields
   const altitude = toFloat(data?.alt);
   const satellites = toFloat(data?.sat);
   const event = toFloat(data?.evt);
   const precision = toFloat(data?.pr);
-  
-  // Device voltage (if available) - save ALL values
-  const deviceVoltage = null; // FMB920 doesn't provide this
+  const course = toFloat(data?.ang);
   
   // Over speed detection (if available) - save ALL values
   const isOverSpeed = toBool(data?.isOverSpeed) ?? null;
@@ -233,6 +236,29 @@ const fromFMB920 = (data: any) => {
       satellites,
       event,
       precision,
+      course,
+      // Store the original MCCMNC (241) and other IO values
+      mccmnc: toFloat(data?.['241']), // Active network (MCCMNC)
+      gsmSignal: toFloat(data?.['21']), // GSM signal strength
+      internalBatteryVoltage: (() => {
+        const voltage = toFloat(data?.['67']);
+        return voltage ? voltage / 1000 : null;
+      })(), // Internal battery voltage (V)
+      batteryCurrent: toFloat(data?.['68']), // Battery current (A)
+      gnssStatus: toFloat(data?.['69']), // GNSS status
+      pdop: (() => {
+        const pdop = toFloat(data?.['181']);
+        return pdop ? pdop / 10 : null;
+      })(), // GNSS PDOP
+      hdop: (() => {
+        const hdop = toFloat(data?.['182']);
+        return hdop ? hdop / 10 : null;
+      })(), // GNSS HDOP
+      sleepMode: toFloat(data?.['200']), // Sleep mode
+      movement: toFloat(data?.['240']), // Movement status
+      bleTemperature: toFloat(data?.['25']), // BLE Temperature #1
+      bleHumidity: toFloat(data?.['86']), // BLE Humidity #1
+      bleCustom: toFloat(data?.['465']), // BLE custom/vendor-specific
       originalData: data // Store original data for debugging
     }
   };
