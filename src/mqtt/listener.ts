@@ -177,11 +177,23 @@ const fromFMB920 = (data: any) => {
   // Fuel level (parameter 241) - save raw value
   const fuelLevel = toFloat(data?.['241']);
   
-  // Location conversion (FMB920 format) - coordinates already in decimal degrees
-  const latRaw = toFloat(data?.['66']);
-  const lngRaw = toFloat(data?.['67']);
-  const locationLat = latRaw ? latRaw : null;
-  const locationLong = lngRaw ? lngRaw : null;
+  // Location conversion (FMB920 format) - parse latlng string
+  let locationLat = null;
+  let locationLong = null;
+  
+  if (data?.latlng && typeof data.latlng === 'string') {
+    const latlngParts = data.latlng.split(',');
+    if (latlngParts.length === 2) {
+      locationLat = parseFloat(latlngParts[0].trim());
+      locationLong = parseFloat(latlngParts[1].trim());
+      
+      // Validate coordinates
+      if (isNaN(locationLat) || isNaN(locationLong)) {
+        locationLat = null;
+        locationLong = null;
+      }
+    }
+  }
   
   // Speed (parameter 21) - save ALL values
   const speed = toFloat(data?.['21']);
@@ -191,6 +203,12 @@ const fromFMB920 = (data: any) => {
   
   // Odometer (parameter 16 or 241) - save ALL values
   const odometerKm = toFloat(data?.['16']) || toFloat(data?.['241']);
+  
+  // Additional FMB920 data fields
+  const altitude = toFloat(data?.alt);
+  const satellites = toFloat(data?.sat);
+  const event = toFloat(data?.evt);
+  const precision = toFloat(data?.pr);
   
   // Device voltage (if available) - save ALL values
   const deviceVoltage = null; // FMB920 doesn't provide this
@@ -209,6 +227,14 @@ const fromFMB920 = (data: any) => {
     deviceVoltage,
     address: null,
     isOverSpeed,
+    // Store additional fields in raw data for debugging/monitoring
+    raw: {
+      altitude,
+      satellites,
+      event,
+      precision,
+      originalData: data // Store original data for debugging
+    }
   };
 };
 
